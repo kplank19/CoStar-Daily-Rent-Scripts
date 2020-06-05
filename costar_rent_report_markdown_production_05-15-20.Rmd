@@ -1,0 +1,3100 @@
+---
+title: "Daily Market Asking Rent Report"
+subtitle: "Costar/Apartments.com"
+output: html_document
+
+---
+
+```{r setup, include=FALSE}
+options(width = 30)
+knitr::opts_chunk$set(echo = TRUE, fig.width=15, fig.height=10)
+#html_document
+```
+
+
+*Charts exclude the bottom 25% initial rents of 150+ unit properties in each region.
+
+
+```{r data_clean, echo=FALSE, warning = FALSE, include = FALSE}
+# Set-Up
+# ctrl+shit+f10 to restart R session
+rm(list = ls())
+
+pacman::p_load(tidyverse, magrittr, janitor, readxl,
+               lubridate, xlsx, formattable, sf, mapview,
+               qdap, ggplot2, scales, DT, stargazer, ggthemes,
+               stringdist, fuzzyjoin, stringr, bdscale, 
+               leaflet, reshape2, dplyr, reactable, sp,
+               ggrepel, ggalt, tidyr, plotly, data.table,
+               gganimate, gifski, png)
+
+# Get WD
+#setwd("E:/Projects_network/HeadRoomAnalysis/asking_rent_reports")
+getwd()
+
+# date
+# YYYYMMDD
+# MUST BE CHANGED TO PREVENT OVERWRITE
+## Add one to lag!
+ # <- Change
+curr <- "20200311"
+time <- as.character(Sys.time())
+time <- substr(time, 1, 10)
+time_x <- time
+time <- gsub("-", "", time)
+print(time)
+curr <- time
+Date1 <- as.Date("2020-02-28")
+Date2 <- as.Date(time_x)    
+days_minus_holiday <- seq(Date1, Date2, "days")
+days_minus_holiday <- subset(days_minus_holiday, days_minus_holiday != "2020-05-25")
+lag <- sum(!weekdays(days_minus_holiday) %in% c("Saturday", "Sunday")) - 1
+lag
+#lag = 10 # <- add 1
+
+# Read in All New Files
+#----
+# NECESSARY CODE
+ df_rents = list.files("C:/Users/kplank/Essex Property Trust, Inc/Costar Data - Documents/asking_rent_reports") %>%
+   str_subset("costar") %>%
+   purrr::set_names() %>%
+   map_dfr(~read_excel(paste0("C:/Users/kplank/Essex Property Trust, Inc/Costar Data - Documents/asking_rent_reports/", .x), na = "NA"), .id="file_name") %>% 
+   clean_names()
+
+
+#----
+# Read in Last Completed File----
+# this wd is the 
+#setwd("C:/Users/kplank/Essex Property Trust, Inc/Costar Data - Documents")
+getwd()
+
+#----
+# Add in Lat & Lon
+# NECESSARY CODE!
+ df_last = list.files("C:/Users/kplank/Essex Property Trust, Inc/Costar Data - Documents") %>%
+   str_subset(".csv") %>%
+   purrr::set_names() %>%
+   map_dfr(~read.csv(paste0("C:/Users/kplank/Essex Property Trust, Inc/Costar Data - Documents/", .x), na = "NA"), .id="file_name")
+
+df_last$unique <- paste0(df_last$property_id, df_last$date) 
+
+df_last <- df_last[!duplicated(df_last$unique), ]
+#----
+#df_last %<>% select(-last)
+
+
+#df_point %<>% select(-file_name)
+
+
+
+# factor project ID
+#df_rents$property_id <- as.factor(as.character(df_rents$property_id))
+
+#df_point$property_id <- as.factor(as.character(df_point$property_id))
+
+#df_point <- df_point[!duplicated(df_point$property_id),]
+
+#df_rents <- merge(df_rents, df_point, by = "property_id")
+
+#
+#df_rents$lat_alt <- df_rents$latitude
+#df_rents$lon_alt <- df_rents$longitude
+
+# If file name contains essex remove TruOwner = Essex
+
+#df_ess <- subset(df_rents, grepl("ess", df_rents$file_name))
+
+#df_other <- subset(df_rents, !grepl("ess", df_rents$file_name))
+
+#----
+#NECESSARY CODE!
+df_ess<- subset(df_rents, grepl("ess", df_rents$file_name))
+# 
+df_rents <- subset(df_rents, !grepl("ess", df_rents$file_name) & df_rents$owner_name != "Essex" & 
+                     df_rents$owner_name != "Essex Property Trust, Inc HQ" & 
+                     df_rents$owner_name != "Essex Property Trust, Inc.")
+# 
+df_rents <- rbind(df_ess, df_rents)
+# 
+# # Set Up Market and Date from file_name
+ df_rents$file_name <- gsub("costar_", "", df_rents$file_name)
+# 
+ df_rents$date <- substring(df_rents$file_name,1,8)
+# 
+ df_rents$geo_region <- substring(df_rents$file_name,9)
+# 
+ df_rents$geo_region <- gsub(".xlsx", "", df_rents$geo_region)
+# 
+ df_rents$date <- ymd(as.character(df_rents$date))
+# 
+ df_rents$unique_id <- paste0(df_rents$property_id, df_rents$date)   
+#  
+ df_rents <- df_rents[!duplicated(df_rents$unique_id),]
+# 
+# 
+ df_rents$date <- as.character(df_rents$date)
+ df_last$date <- as.character(df_last$date)
+# 
+ df_rents$property_id <- as.character(df_rents$property_id)
+ df_last$property_id <- as.character(df_last$property_id)
+# 
+# 
+ df_rents <- plyr::rbind.fill(df_rents, df_last)
+# 
+ df_rents$date <- ymd(df_rents$date)
+# 
+# 
+# # Group and Lag
+ df_rents <- 
+   df_rents %>%
+   group_by(property_id) %>%
+   arrange(date) %>%
+   mutate(avg_asking_unit_lag = lag(avg_asking_unit, n = 1, default = NA),
+          avg_asking_unit_fl = lag(avg_asking_unit, n = lag, default = NA),
+          avg_asking_one_bed_lag = lag(one_bedroom_asking_rent_unit, n = 1, default = NA),
+          avg_asking_one_bed_fl = lag(one_bedroom_asking_rent_unit, n = lag, default = NA)) 
+# 
+# #top_n(x, n, wt)
+# 
+# 
+ df_rents$avg_asking_unit_diff <- df_rents$avg_asking_unit - df_rents$avg_asking_unit_lag
+# 
+ df_rents$avg_asking_unit_diff_fl <- df_rents$avg_asking_unit - df_rents$avg_asking_unit_fl
+# 
+ df_rents$avg_asking_one_bedroom_unit_diff_fl <- df_rents$one_bedroom_asking_rent_unit - df_rents$avg_asking_one_bed_fl
+# 
+ df_rents$avg_asking_one_bedroom_unit_diff <- df_rents$one_bedroom_asking_rent_unit - df_rents$avg_asking_one_bed_lag
+# 
+ df_rents$percent_one_bed_avg_asking_rent_change <- df_rents$avg_asking_one_bedroom_unit_diff_fl/df_rents$avg_asking_one_bed_fl
+# 
+# 
+ df_rents %<>% select(-file_name)
+# 
+ df_rents %<>% select(date, everything())
+# 
+ df_year <- subset(df_rents, df_rents$date == ymd("2020-03-11"))
+# 
+ df_sub <- subset(df_rents, df_rents$property_id == 4523585)
+ df_sub1 <- subset(df_rents, df_rents$property_id == 4032909)
+#----
+
+ # Write out data to two locations and adjust paths if necessary
+out_path <- paste0("E:/Projects_network/HeadRoomAnalysis/arr_cleaned/costar_df_", curr, ".csv")
+#out_path <- paste0("E:/Projects_network/HeadRoomAnalysis/arr_cleaned/costar_df_", #curr, ".csv")
+
+sharepoint_path <- paste0("C:/Users/kplank/Essex Property Trust, Inc/Costar Data - Documents/costar_df_", curr, ".csv")
+#sharepoint_path <- paste0("C:/Users/kplank/Essex Property Trust, Inc/Costar Data - #Documents/costar_df_", curr, ".csv")
+
+#(df_rents, out_path)
+# 
+fwrite(df_rents, sharepoint_path)
+
+
+
+curr <- "20200311"
+time <- as.character(Sys.time())
+time <- substr(time, 1, 10)
+time_x <- time
+time <- gsub("-", "", time)
+print(time)
+curr <- time
+
+
+#Setup for different run time
+# curr <- "20200513"
+# time_x <- "2020-05-13"
+#
+
+df_rents <- read.csv(paste0("C:/Users/kplank/Essex Property Trust, Inc/Costar Data - Documents/costar_df_", curr, ".csv"))
+
+df_rents <- subset(df_rents, df_rents$property_id!= 1585983)
+df_rents$date <- ymd(df_rents$date)
+ df_rents %<>% group_by(property_id) %>% 
+    arrange(property_id, date) %>% 
+    fill(names(select(ungroup(df_rents), -property_id)), .direction = c("down")) %>%
+    fill(names(select(ungroup(df_rents), -property_id)), .direction = c("up")) %>%
+    ungroup()
+ 
+df_rents$date <- as.character(df_rents$date)
+
+
+df_rents_rooms_init <- df_rents %>% filter(date %in% "2020-02-28") %>% 
+   select(property_id, one_bedroom_asking_rent_init= one_bedroom_asking_rent_unit,
+          two_bedroom_asking_avg_init = two_bedroom_asking_rent_unit,
+          studio_asking_avg_init = studio_asking_rent_unit)
+
+df_rents <- merge(df_rents, df_rents_rooms_init, by="property_id")
+
+df_rents %<>% select(-essex_markets, -ess_submarket)
+
+
+
+#attach submarket
+df_rents$zip_short <- substr(df_rents$zip, 1, 5)
+
+mapper <- read.csv("C:/Users/kplank/Essex Property Trust, Inc/Costar Data - Documents/submarket_mapping/mapper.csv")
+mapper %<>% select(-X)
+df_rents <- merge(df_rents, mapper, by.x="zip_short", by.y = "zip", all.x = TRUE)
+
+df_rents$ess_submarket <- as.character(df_rents$ess_submarket)
+
+df_rents$ess_submarket <- ifelse(is.na(df_rents$ess_submarket),"Unidentified", df_rents$ess_submarket)
+
+
+
+#effective rent fl
+
+eff_fl <- subset(df_rents, df_rents$date == "2020-02-28")
+
+eff_fl %<>% select(property_id,
+                   avg_asking_unit_init = avg_asking_unit,
+                   avg_effective_unit_init = avg_effective_unit, 
+                   one_bedroom_effective_rent_unit_init = one_bedroom_effective_rent_unit, 
+                   two_bedroom_effective_rent_unit_init = two_bedroom_effective_rent_unit, 
+                   studio_effective_rent_unit_init = studio_effective_rent_unit)
+
+df_rents <- merge(df_rents, eff_fl, by = "property_id")
+
+df_rents$effective_pct <- (df_rents$avg_effective_unit - df_rents$avg_effective_unit_init)/df_rents$avg_effective_unit_init
+
+
+```
+
+```{r data_cleaning_owner_changes, echo=FALSE, warning = FALSE, include= FALSE}
+#create Grey star owner
+
+
+# check which reits have the most units
+# df_rents <- subset(df_rents, df_rents$date == time_x)
+# x <- df_rents %>% group_by(owner_name) %>%
+#      summarise(number_of_units=sum(number_of_units))
+ess_id <- read_excel("C:/Users/kplank/Essex Property Trust, Inc/Costar Data - Documents/asking_rent_reports/archive/costar_20200415_ess.xlsx")
+ess_ids <- ess_id$PropertyID
+
+
+df_rents$owner_name <- as.character(df_rents$owner_name)
+df_rents$owner_name <- ifelse(grepl("Greystar",df_rents$property_manager_name), "Greystar", df_rents$owner_name)
+
+
+df_rents$owner_name <- ifelse(df_rents$property_id %in% ess_ids, "Essex Property Trust, Inc.", df_rents$owner_name)
+#switch gerson bakar & associates and bakar for greystar
+
+
+
+df_stored <- df_rents
+fwrite(df_stored,"C:/Users/kplank/Essex Property Trust, Inc/Costar Data - Documents/current_storage.csv")
+#df_rents %<>% select(-X)
+#easy way to prevent losing the lat and longitude variables after sf transformations
+df_rents$lon_alt <- df_rents$longitude
+df_rents$lat_alt <- df_rents$latitude
+
+
+```
+
+
+```{r extra_powerbi_data, echo=FALSE, warning = FALSE, include= FALSE}
+
+#Write out data to be used in  more in-depth powerbi report
+
+pb_data <- df_rents
+
+
+market_name <- levels(as.factor(pb_data$market_name))
+essex_markets <- c("Oakland", "Orange", "Los Angeles", "San Francisco", "Orange", "San Diego", "San Francisco",
+                   "Ventura", "San Jose", "Seattle", "San Jose")
+
+marx <- data.frame(market_name, essex_markets)
+
+pb_data <- merge(pb_data, marx, by = "market_name")
+
+pb_data$essex_markets <- as.character(pb_data$essex_markets)
+
+pb_data$essex_markets <- ifelse(pb_data$county_name == "Ventura", "Ventura", pb_data$essex_markets)
+
+market_id_storage <- pb_data %>% filter(date %in% time_x) %>% select(property_id, essex_markets)
+market_id_storage_name <- pb_data %>% filter(date %in% time_x) %>% select(property_id, property_name, essex_markets)
+
+
+
+#unit count
+pb_count <- pb_data %>% filter(date %in% time_x) %>% 
+   select(property_id, essex_markets, owner_name, submarket_name, number_of_units) %>%
+   group_by(essex_markets, submarket_name, owner_name) %>% 
+   summarise(total_units = sum(number_of_units),
+             porpety_count = n()) %>%
+   filter(owner_name %in% c("Essex Property Trust, Inc.", "AvalonBay Communities, Inc.", "Equity Residential", "UDR, Inc.", "The Irvine Company", "Apartment Investment and Management Company"))
+
+#fwrite(pb_count, "C:/Users/kplank/Essex Property Trust, Inc/Costar Data - Documents/costar_submarket_by_reit_count.csv")
+
+#df_rents_fl_by_unit$essex_markets <- as.factor(df_rents_fl_by_unit$essex_markets)
+
+rm(marx)
+
+#(pb_data, "C:/Users/kplank/Essex Property Trust, Inc/DART - Documents/PULSE/rent_data/latest/costar_df_latest.csv")
+
+```
+
+## `r format(Sys.time(), '%d %B, %Y')`
+
+
+```{r extra_hists_clean_&_check, echo=FALSE, warning = FALSE, include= FALSE}
+
+#check an essex property
+#check to see if inidividual properties have the right amount of observations
+df_sub <- subset(df_rents, df_rents$property_id == 8881532)
+df_sub2 <- subset(df_rents, df_rents$property_id == 10609010)
+
+# cha cha cha cha changessss
+total_properties <- length(levels(as.factor(as.character(df_rents$property_id))))
+
+changes_fl <- df_rents[!is.na(df_rents$avg_asking_unit_diff_fl),]
+#changes_fl <- df_rents
+
+changes <- df_rents[!is.na(df_rents$avg_asking_unit_diff),]
+
+changes$percent_avg_asking_rent_change <- changes$avg_asking_unit_diff/changes$avg_asking_unit_lag
+
+changes$percent_avg_asking_rent_change_unit_weight <- changes$percent_avg_asking_rent_change*changes$number_of_units
+  
+  
+#changes$percent_one_bed_avg_asking_rent_change <- df_rents$avg_asking_one_bedroom_unit_diff_fl/avg_asking_one_bed_fl
+
+changes$percent_avg_asking_rent_change_format <- formattable::percent(changes$percent_avg_asking_rent_change)
+
+changes_fl$percent_avg_asking_rent_change_fl <- changes_fl$avg_asking_unit_diff_fl/changes_fl$avg_asking_unit_fl
+
+
+changes$avg_asking_unit_diff <- as.character(changes$avg_asking_unit_diff)
+non_zero <- changes
+changes$avg_asking_unit_diff <- as.numeric(changes$avg_asking_unit_diff)
+
+changes_fl$percent_avg_asking_rent_change_fl <- as.character(changes_fl$percent_avg_asking_rent_change_fl)
+non_zero_fl <- changes_fl
+#non_zero_fl <- subset(changes_fl, changes_fl$percent_avg_asking_rent_change_fl != "0")
+non_zero_fl$percent_avg_asking_rent_change_fl <- as.numeric( non_zero_fl$percent_avg_asking_rent_change_fl)
+
+
+
+df_rents <- subset(non_zero_fl, non_zero_fl$percent_avg_asking_rent_change_fl > -0.15 &
+                        non_zero_fl$percent_avg_asking_rent_change_fl < .15)
+
+df_outliers <- subset(non_zero_fl, non_zero_fl$percent_avg_asking_rent_change_fl < -0.05 |
+                        non_zero_fl$percent_avg_asking_rent_change_fl > .05)
+
+#hist(df_rents$percent_avg_asking_rent_change_fl)
+df_rents_line <- df_rents
+
+kep <- df_rents[!is.na(df_rents$percent_avg_asking_rent_change_fl),]
+kep %<>% select(property_id,property_name, market_name, percent_avg_asking_rent_change_fl, latitude, longitude, )
+
+fwrite(kep,paste0("C:/Users/kplank/Essex Property Trust, Inc/Costar Data - Documents/kepler/kepler_arr",curr,".csv"))
+
+df_rents %<>% select(-energy_star, -construction_material, -building_park, -features, -leed_certified, -property_manager_address, -property_manager_phone, -zoning, -land_area_ac, -owner_contact, -sales_contact, -property_manager_city_state_zip, -property_manager_name, -for_sale_price, -style, -state, -submarket_cluster, -star_rating, -owner_contact)
+
+#df_rents_fl_by_unit <- data.frame(df_rents[rep(seq_len(dim(df_rents)[1]), df_rents$number_of_units), , drop = FALSE], row.names=NULL)
+df_rents_fl_by_unit <- df_rents
+
+
+# Attach appropriate Essex Market name
+#----
+market_name <- levels(as.factor(df_rents_fl_by_unit$market_name))
+essex_markets <- c("Oakland", "Orange", "Los Angeles", "San Francisco", "Orange", "San Diego", "San Francisco",
+                   "Ventura", "San Jose", "Seattle", "San Jose")
+
+marx <- data.frame(market_name, essex_markets)
+
+df_rents_fl_by_unit <- merge(df_rents_fl_by_unit, marx, by = "market_name")
+
+df_rents_fl_by_unit$essex_markets <- as.character(df_rents_fl_by_unit$essex_markets)
+
+df_rents_fl_by_unit$essex_markets <- ifelse(df_rents_fl_by_unit$county_name == "Ventura", "Ventura", df_rents_fl_by_unit$essex_markets)
+
+df_rents_fl_by_unit$essex_markets <- as.factor(df_rents_fl_by_unit$essex_markets)
+#----
+
+# Assign Regions
+#----
+df_rents_fl_by_unit$region <- ifelse(df_rents_fl_by_unit$essex_markets == "Seattle", "PNW",
+                                     ifelse(df_rents_fl_by_unit$essex_markets == "San Francisco" | 
+                                              df_rents_fl_by_unit$essex_markets == "San Jose" | 
+                                              df_rents_fl_by_unit$essex_markets == "Oakland", "NorCal", "SoCal"))
+
+
+
+df_rents_fl_by_unit$region <- as.factor(df_rents_fl_by_unit$region)
+#---
+
+
+# For loop tmoves bottom quartile of each region
+reg <- levels(df_rents_fl_by_unit$region)
+
+for (x in reg){
+#   
+filt <- subset(df_rents_fl_by_unit, df_rents_fl_by_unit$region == x)
+# 
+filt$initial_rent_quant <- gtools::quantcut(filt$avg_asking_unit_fl, q=4, na.rm=TRUE)
+# 
+
+filt$initial_rent_quant_clean <- ifelse(filt$initial_rent_quant == levels(filt$initial_rent_quant)[1], "0-25%", ifelse(filt$initial_rent_quant == levels(filt$initial_rent_quant)[2], "25-50%", ifelse(filt$initial_rent_quant == levels(filt$initial_rent_quant[3]), "50-75%", "75%-100%")))
+# 
+filt <- subset(filt, filt$initial_rent_quant_clean != "0-25%")
+
+assign(paste0("filtered_", x), filt)
+
+}
+
+# rebind the now filtered regions
+df_rents_fl_by_unit <- rbind(filtered_NorCal, filtered_SoCal, filtered_PNW)
+
+# list of IDs for filtering
+ids <- df_rents_fl_by_unit$property_id
+
+
+# Note: unfiltered storage craetes
+unfiltered_storage <- changes
+
+# Uselsit of 25-100% quartiles to filter all other data sets
+changes %<>% filter(property_id %in% ids)
+
+changes_fl %<>% filter(property_id %in% ids)
+
+df_rents %<>% filter(property_id %in% ids)
+
+df_rooms <- df_stored %>% filter(property_id %in% ids)
+
+
+#submarket storage
+submarket_storage <- df_rents
+
+
+# submarket & reit unit counts
+
+
+
+
+
+```
+
+
+
+
+```{r line_graph_clean, echo=FALSE, warning=FALSE, include = FALSE}
+
+
+
+# Attach Market Name to changes dataset
+#----
+market_name <- levels(as.factor(changes$market_name))
+essex_markets <- c("Oakland", "Orange", "Los Angeles", "San Francisco", "Orange", "San Diego", "San Francisco",
+                    "Ventura", "San Jose", "Seattle", "San Jose")
+# 
+marx <- data.frame(market_name, essex_markets)
+# 
+changes <- merge(changes, marx, by = "market_name")
+# 
+changes$essex_markets <- as.character(changes$essex_markets)
+# 
+changes$essex_markets <- ifelse(changes$county_name == "Ventura", "Ventura", changes$essex_markets)
+# 
+changes$essex_markets <- as.factor(changes$essex_markets)
+# 
+rm(marx)
+#----
+
+
+# Places makes sure the first observation column has a value in place for all NAs
+impute.mean <- function(x) replace(x, is.na(x), mean(x, na.rm = TRUE))
+dat <- changes
+x <- dat
+dat <- x
+dat %<>%
+    group_by(property_id) %>%
+    mutate(avg_asking_unit_fl = impute.mean(avg_asking_unit_fl)) %>%
+    ungroup()
+
+dat$avg_asking_unit_fl_diff <- dat$avg_asking_unit - dat$avg_asking_unit_fl
+dat$percent_avg_asking_rent_change_fl <- dat$avg_asking_unit_fl_diff/dat$avg_asking_unit_fl
+
+
+unfiltered_storage %<>%
+    group_by(property_id) %>%
+    mutate(avg_asking_unit_fl = impute.mean(avg_asking_unit_fl)) %>%
+    ungroup()
+unfiltered_storage$avg_asking_unit_fl_diff <- unfiltered_storage$avg_asking_unit - unfiltered_storage$avg_asking_unit_fl
+unfiltered_storage$percent_avg_asking_rent_change_fl <- unfiltered_storage$avg_asking_unit_fl_diff/unfiltered_storage$avg_asking_unit_fl
+
+
+# Remove any extra essex properties from unfilitered storage
+#----
+unfiltered_storage$date_id <- paste0(unfiltered_storage$date, unfiltered_storage$property_id) # unique id
+unfiltered_storage$date_id <- as.factor(unfiltered_storage$date_id)
+unfiltered_storage_test <- unfiltered_storage[!duplicated(unfiltered_storage$date_id), ] # remove duplicates of unique id
+
+unfiltered_storage_test <- subset(unfiltered_storage_test, unfiltered_storage_test$date == "2020-04-03")
+unfiltered_storage_test <- subset(unfiltered_storage_test, unfiltered_storage_test$owner_name == "Essex Property Trust, Inc.")
+rm(unfiltered_storage_test) # clear out test dataset
+#----
+
+# Assign market names/region
+changes <- dat
+#submarket storage
+submarket_storage <- dat
+
+dat$region <- ifelse(dat$essex_markets == "Seattle", "PNW", ifelse(dat$essex_markets == "San Francisco" | dat$essex_markets == "San Jose" | dat$essex_markets == "Oakland", "NorCal", "SoCal"))
+
+# Assign different dataset names
+dat_mark <- dat
+dat_port <- dat
+dat_reit <- unfiltered_storage
+
+# filter down to select REITS
+reits <- c("Essex Property Trust, Inc.", "AvalonBay Communities, Inc.", "Equity Residential", "UDR, Inc.", "The Irvine Company", "Apartment Investment and Management Company",  "R&V Management", "Greystar", "Prometheus Real Estate Group, Inc.")
+dat_reit$owner_name <- as.factor(dat_reit$owner_name)
+dat_reit %<>% filter(owner_name %in% reits)
+
+# dat_avalon_socal <- subset(dat_reit, dat_reit$owner_name == "AvalonBay Communities, Inc.")
+# dat_avalon_socal %<>% filter(market_name %in% c("Inland Empire (California)", "Los Angeles", "Orange County (California)", "San Diego", "Santa Barbara/Sta Maria/Goleta", "Santa Cruz/Watsonville"))
+# 
+# market_name <- levels(as.factor(changes$market_name))
+# essex_markets <- c("Oakland", "Orange", "Los Angeles", "San Francisco", "Orange", "San Diego", "San Francisco",
+#                     "Ventura", "San Jose", "Seattle", "San Jose")
+# # 
+# marx <- data.frame(market_name, essex_markets)
+# # 
+# dat_avalon_socal <- merge(dat_avalon_socal, marx, by = "market_name")
+# # 
+# dat_avalon_socal$essex_markets <- as.character(dat_avalon_socal$essex_markets)
+# # 
+# dat_avalon_socal$essex_markets <- ifelse(dat_avalon_socal$county_name == "Ventura", "Ventura", changes$essex_markets)
+# # 
+# dat_avalon_socal$essex_markets <- as.factor(dat_avalon_socal$essex_markets)
+# # 
+# rm(marx)
+# 
+# fwrite(dat_avalon_socal, "avalon_socal_data.csv")
+
+
+#effective_pct
+
+# Clean data to for weighted rented change
+dat %<>% 
+  select(region, date, percent_avg_asking_rent_change_fl, effective_pct, number_of_units) %>% 
+  group_by(region, date) %>%
+  mutate(region_units = sum(number_of_units), weighted_fl = (percent_avg_asking_rent_change_fl*number_of_units),
+         weighted_eff = (effective_pct*number_of_units)) %>%
+  ungroup() %>%
+  mutate(weighted_fl = (weighted_fl/region_units),
+         weighted_eff = (weighted_eff/region_units))
+dat <- dat[complete.cases(dat), ] # clean duplicates
+dat%<>%
+  group_by(region, date) %>%
+  summarise(cum_avg_asking_change = sum(weighted_fl),
+            cum_avg_effective_change = sum(weighted_eff))
+
+# Apply data changes for market chart
+dat_mark %<>% 
+  select(essex_markets, date, percent_avg_asking_rent_change_fl, effective_pct, number_of_units) %>% 
+  group_by(essex_markets, date) %>%
+  mutate(region_units = sum(number_of_units), weighted_fl = (percent_avg_asking_rent_change_fl*number_of_units),
+         weighted_eff = (effective_pct*number_of_units)) %>%
+  ungroup() %>%
+  mutate(weighted_fl = (weighted_fl/region_units), 
+         weighted_eff = (weighted_eff/region_units))
+dat_mark <- dat_mark[complete.cases(dat_mark), ] # clean duplicates
+dat_mark%<>%
+  group_by(essex_markets, date) %>%
+  summarise(cum_avg_asking_change = sum(weighted_fl),
+            cum_avg_effective_change = sum(weighted_eff))
+
+
+# Apply data changes for market portfolio
+dat_port %<>% 
+  select(date, percent_avg_asking_rent_change_fl, effective_pct, number_of_units) %>% 
+  group_by(date) %>%
+  mutate(region_units = sum(number_of_units), weighted_fl = (percent_avg_asking_rent_change_fl*number_of_units),
+         weighted_eff = (effective_pct*number_of_units)) %>%
+  ungroup() %>%
+  mutate(weighted_fl = (weighted_fl/region_units),
+         weighted_eff = (weighted_eff/region_units))
+dat_port <- dat_port[complete.cases(dat_port), ] # clean duplicates
+dat_port%<>%
+  group_by(date) %>%
+  summarise(cum_avg_asking_change = sum(weighted_fl),
+            cum_avg_effective_change = sum(weighted_eff))
+
+
+
+
+
+
+
+
+
+# apply market names to REIT data
+
+market_name <- levels(as.factor(changes$market_name))
+essex_markets <- c("Oakland", "Orange", "Los Angeles", "San Francisco", "Orange", "San Diego", "San Francisco",
+                    "Ventura", "San Jose", "Seattle", "San Jose")
+# 
+marx <- data.frame(market_name, essex_markets)
+# 
+dat_reit <- merge(dat_reit, marx, by = "market_name")
+# 
+dat_reit$essex_markets <- as.character(dat_reit$essex_markets)
+# 
+dat_reit$essex_markets <- ifelse(dat_reit$county_name == "Ventura", "Ventura", dat_reit$essex_markets)
+# 
+dat_reit$essex_markets <- as.factor(dat_reit$essex_markets)
+# 
+rm(marx)
+
+
+# Irvine check
+#----
+# dat_reit$date <- ymd(dat_reit$date)
+# dat_reit %<>% 
+#   select(date, percent_avg_asking_rent_change_fl, number_of_units, owner_name, property_id, property_name, avg_asking_unit_change=avg_asking_unit_fl_diff, avg_asking_unit, essex_markets)
+
+#irv <- subset(dat_reit, dat_reit$owner_name == "The Irvine Company")
+   
+#fwrite(irv, "irvine_costar.csv")
+#----
+
+ 
+# Market reit preparation for market reit avg change
+dat_reit_mark <- dat_reit %>% 
+  select(date, percent_avg_asking_rent_change_fl, effective_pct, number_of_units, owner_name, essex_markets) %>% 
+  group_by(date, owner_name, essex_markets) %>%
+  mutate(region_units = sum(number_of_units), weighted_fl = (percent_avg_asking_rent_change_fl*number_of_units),
+         weighted_eff = (effective_pct*number_of_units)) %>%
+  ungroup() %>%
+  mutate(weighted_fl = (weighted_fl/region_units),
+         weighted_eff = (weighted_eff/region_units))
+dat_reit_mark <- dat_reit_mark[complete.cases(dat_reit_mark), ] # clean duplicates
+dat_reit_mark%<>%
+  group_by(date, owner_name, essex_markets) %>%
+  summarise(cum_avg_asking_change = sum(weighted_fl), cum_avg_effective_change = sum(weighted_eff), reit_units = mean(region_units))
+
+# Market reit preparation for reit avg change
+dat_reit %<>% 
+  select(date, percent_avg_asking_rent_change_fl, effective_pct, number_of_units, owner_name) %>% 
+  group_by(date, owner_name) %>%
+  mutate(region_units = sum(number_of_units), weighted_fl = (percent_avg_asking_rent_change_fl*number_of_units),
+         weighted_eff = (effective_pct*number_of_units)) %>%
+  ungroup() %>%
+  mutate(weighted_fl = (weighted_fl/region_units),
+         weighted_eff = (weighted_eff/region_units))
+dat_reit <- dat_reit[complete.cases(dat_reit), ] # clean duplicates
+dat_reit%<>%
+  group_by(date, owner_name) %>%
+  summarise(cum_avg_asking_change = sum(weighted_fl), cum_avg_effective_change = sum(weighted_eff), reit_units = mean(region_units))
+
+
+
+# Create Unit Count And REIT Name variable
+#----
+reit_current_units <- subset(dat_reit, dat_reit$date == time_x)
+
+reit_current_units %<>% ungroup()
+
+reit_current_units %<>% select(unit_character = reit_units, owner_name)
+
+dat_reit <- merge(dat_reit, reit_current_units, by.x = "owner_name", by.y = "owner_name")
+
+dat_reit$unit_character <- as.character(dat_reit$unit_character)
+
+dat_reit$owner_name_unit <- paste0(dat_reit$owner_name, " (", dat_reit$unit_character, " units)")
+
+#---
+
+
+
+
+fwrite(dat, "C:/Users/kplank/Essex Property Trust, Inc/DART - Documents/PULSE/cum_avg_ask.csv") # updatable powerbidata
+
+
+# Ungroup and create easy to use names in ggplots
+#----
+cum_avg_ask <- dat
+cum_avg_ask <- ungroup(cum_avg_ask)
+
+cum_avg_ask_mark <- dat_mark
+cum_avg_ask_mark <- ungroup(cum_avg_ask_mark)
+
+cum_avg_ask_port <- dat_port
+cum_avg_ask_port <- ungroup(cum_avg_ask_port)
+
+cum_avg_ask_reit <- dat_reit
+cum_avg_ask_reit <- ungroup(cum_avg_ask_reit)
+
+
+cum_avg_ask_reit_mark <- dat_reit_mark
+cum_avg_ask_reit_mark <- ungroup(cum_avg_ask_reit_mark)
+#----
+
+
+fwrite(changes, paste0("power_bi_data", curr, ".csv")) # archived powerbi data
+
+# High low changes by region
+# Creates proportions of units that are higher/lower than starting date
+#----
+
+# Select appropriate data and assign create region column
+market_ts <-changes %>% select(essex_markets, date, percent_avg_asking_rent_change_fl, effective_pct, number_of_units)
+region_ts <- market_ts
+region_ts$region <- ifelse(region_ts$essex_markets == "Seattle", "PNW", ifelse(region_ts$essex_markets == "San Francisco" | region_ts$essex_markets == "San Jose" | region_ts$essex_markets == "Oakland", "NorCal", "SoCal"))
+
+# divide data into positive and negative change
+region_ts$region <- as.factor(region_ts$region)
+region_ts <- region_ts %>% group_by(region, date) %>% mutate(region_units = sum(number_of_units)) %>% ungroup()
+region_ts_1 <- region_ts
+region_ts <- region_ts %>% subset(region_ts$percent_avg_asking_rent_change_fl < 0)
+region_ts_1 <- region_ts_1 %>% subset(region_ts_1$percent_avg_asking_rent_change_fl > 0)
+
+region_ts <- region_ts %>% group_by(region, date) %>% mutate(positive_number_of_units = sum(number_of_units))%>% ungroup()
+region_ts$proportion_pos_change <- region_ts$positive_number_of_units/region_ts$region_units
+
+
+region_ts %<>%
+   select(-percent_avg_asking_rent_change_fl) %>% 
+   group_by(region, date) %>%
+   summarise(average = mean(proportion_pos_change)) %>% ungroup()
+
+
+region_ts_1 <- region_ts_1 %>% group_by(region, date) %>% mutate(positive_number_of_units = sum(number_of_units))%>% ungroup()
+region_ts_1$proportion_pos_change <- region_ts_1$positive_number_of_units/region_ts_1$region_units
+
+region_ts_1 %<>%
+   select(-percent_avg_asking_rent_change_fl) %>% 
+   group_by(region, date) %>%
+   summarise(average = mean(proportion_pos_change)) %>% ungroup()
+#---- 
+
+#market_ts <- data.frame(market_ts[rep(seq_len(dim(market_ts)[1]), market_ts$number_of_units), , drop = FALSE], row.names=NULL)
+
+#market_ts <- market_ts %>% subset(market_ts$percent_avg_asking_rent_change != 0)
+
+
+# Apply the same proportion cleaning to the portfolio and market data
+#----
+portfolio_ts <- market_ts
+
+market_ts <- market_ts %>% group_by(essex_markets, date) %>% mutate(market_units = sum(number_of_units)) %>% ungroup()
+
+market_ts_1 <- market_ts
+
+portfolio_ts <- portfolio_ts %>% group_by(date) %>% mutate(market_units = sum(number_of_units))%>% ungroup()
+
+portfolio_ts_1 <- portfolio_ts
+
+market_ts <- market_ts %>% subset(market_ts$percent_avg_asking_rent_change_fl < 0)
+
+market_ts_1 <- market_ts_1 %>% subset(market_ts_1$percent_avg_asking_rent_change_fl > 0)
+
+portfolio_ts <- portfolio_ts %>% subset(portfolio_ts$percent_avg_asking_rent_change_fl < 0)
+
+portfolio_ts_1 <- portfolio_ts_1 %>% subset(portfolio_ts_1$percent_avg_asking_rent_change_fl > 0)
+
+
+portfolio_ts <- portfolio_ts %>% group_by(date) %>% mutate(positive_number_of_units = sum(number_of_units))%>% ungroup()
+
+market_ts <- market_ts %>% group_by(essex_markets, date) %>% mutate(positive_number_of_units = sum(number_of_units))%>% ungroup()
+
+market_ts$proportion_pos_change <- market_ts$positive_number_of_units/market_ts$market_units
+
+
+portfolio_ts_1 <- portfolio_ts_1 %>% group_by(date) %>% mutate(positive_number_of_units = sum(number_of_units))%>% ungroup()
+
+portfolio_ts$proportion_pos_change <- portfolio_ts$positive_number_of_units/portfolio_ts$market_units
+
+portfolio_ts_1$proportion_pos_change <- portfolio_ts_1$positive_number_of_units/portfolio_ts_1$market_units
+
+market_ts_1 <- market_ts_1 %>% group_by(essex_markets, date) %>% mutate(positive_number_of_units = sum(number_of_units))%>% ungroup()
+
+market_ts_1$proportion_pos_change <- market_ts_1$positive_number_of_units/market_ts_1$market_units
+
+#----
+
+# market_ts$category <- ifelse(market_ts$percent_avg_asking_rent_change > 0, 1, 0) 
+
+#Weight by Units
+
+# Create high and low data for REITS
+#----
+reit_ts <- unfiltered_storage %>% select(owner_name, date, percent_avg_asking_rent_change_fl, number_of_units)
+
+reits <- c("Essex Property Trust, Inc.", "AvalonBay Communities, Inc.", "Equity Residential", "UDR, Inc.", "The Irvine Company", "Apartment Investment and Management Company", "R&V Management", "Greystar", "Prometheus Real Estate Group, Inc.")
+reit_ts$owner_name <- as.factor(reit_ts$owner_name)
+reit_ts %<>% filter(owner_name %in% reits)
+
+
+reit_ts <- reit_ts %>% group_by(owner_name, date) %>% mutate(reit_units = sum(number_of_units)) %>% ungroup()
+reit_ts_1 <- reit_ts %>% subset(reit_ts$percent_avg_asking_rent_change_fl > 0)
+reit_ts <- reit_ts %>% subset(reit_ts$percent_avg_asking_rent_change_fl < 0)
+
+
+reit_ts <- reit_ts %>% group_by(owner_name, date) %>% mutate(positive_number_of_units = sum(number_of_units)) %>% ungroup()
+reit_ts$proportion_pos_change <- reit_ts$positive_number_of_units/reit_ts$reit_units
+
+reit_ts_1 <- reit_ts_1 %>% group_by(owner_name, date) %>% mutate(positive_number_of_units = sum(number_of_units)) %>% ungroup()
+reit_ts_1$proportion_pos_change <- reit_ts_1$positive_number_of_units/reit_ts_1$reit_units
+#----
+
+# Remove extra variable, and create one observation for each day]
+# Apply to all necessary dataset
+portfolio_ts %<>%
+   select(-percent_avg_asking_rent_change_fl) %>% 
+   group_by(date) %>%
+   summarise(average = mean(proportion_pos_change)) %>% ungroup()
+
+portfolio_ts_1 %<>%
+   select(-percent_avg_asking_rent_change_fl) %>% 
+   group_by(date) %>%
+   summarise(average = mean(proportion_pos_change)) %>% ungroup()
+# 
+market_ts %<>%
+   select(-percent_avg_asking_rent_change_fl) %>% 
+   group_by(essex_markets, date) %>%
+   summarise(average = mean(proportion_pos_change)) %>% ungroup()
+# 
+market_ts_1 %<>%
+   select(-percent_avg_asking_rent_change_fl) %>% 
+   group_by(essex_markets, date) %>%
+   summarise(average = mean(proportion_pos_change)) %>% ungroup()
+# 
+reit_ts %<>%
+   select(-percent_avg_asking_rent_change_fl) %>% 
+   group_by(owner_name, date) %>%
+   summarise(average = mean(proportion_pos_change)) %>% ungroup()
+# 
+reit_ts_1 %<>%
+   select(-percent_avg_asking_rent_change_fl) %>% 
+   group_by(owner_name, date) %>%
+   summarise(average = mean(proportion_pos_change)) %>% ungroup()
+
+
+```
+
+```{r line_graph_pos_&_neg, echo=FALSE, warning=FALSE, results = "asis"}
+
+
+region_ts$Change <- "Lower"
+region_ts_1$Change <- "Higher"
+
+comb_region <- rbind(region_ts, region_ts_1)
+comb_region$region <- as.factor(comb_region$region)
+comb_region$date <- ymd(comb_region$date)
+
+
+portfolio_ts$Change <- "Lower"
+portfolio_ts_1$Change <- "Higher"
+
+comb_portfolio <- rbind(portfolio_ts, portfolio_ts_1)
+comb_portfolio$essex_markets <- "ESS Portfolio"
+
+
+market_ts$Change <- "Lower"
+market_ts_1$Change <- "Higher"
+
+
+comb_market <- rbind(market_ts, market_ts_1)
+comb_market <- rbind(comb_market, comb_portfolio)
+comb_market$essex_markets <- as.factor(comb_market$essex_markets)
+comb_market$date <- ymd(comb_market$date)
+comb_market$essex_markets <- factor(comb_market$essex_markets , levels = c("Los Angeles", "Orange", "San Diego",
+                                                                           "San Francisco", "Oakland", "San Jose",
+                                                                           "Seattle", "Ventura", "ESS Portfolio"))
+
+
+
+
+reit_ts$Change <- "Lower"
+reit_ts_1$Change <- "Higher"
+comb_reit <- rbind(reit_ts, reit_ts_1)
+comb_reit <- subset(comb_reit, comb_reit$date != "2020-03-03" & comb_reit$date != "Essex Property Trust, Inc.")
+comb_reit$date <- ymd(comb_reit$date)
+
+
+
+
+# Grab list of appropriate dates for ggplots
+
+business_days <- ymd(levels(as.factor(comb_reit$date)))
+
+
+
+
+comb_region_plot <- ggplot(comb_region, aes(x = date, y = average)) + 
+   geom_line(aes(color = Change), size = 1) +
+   scale_color_manual(values=c('forestgreen','darkred'))+
+   ggtitle("Share of Market-Rate Units with Higher vs. Lower Asking Rents vs. 2/28 Level") + 
+   xlab("") + 
+   ylab("") +
+   labs(color='Change since 2/28:') +
+   scale_y_continuous(labels = scales::percent_format(accuracy = 1), limits = c(0,.9)) +
+   theme_economist() +
+   #scale_colour_economist()+
+   theme(axis.title = element_text(size = rel(1)), axis.text = element_text(size = 10),
+         plot.title = element_text(size=18), panel.spacing.x = unit(5, "mm"),
+         axis.title.x = element_blank(), axis.text.x = element_text(angle=45, hjust = 1, vjust = 1)) +
+   scale_x_bd(business.dates=business_days, max.major.breaks = 15, labels=date_format('%b-%d'))+
+   facet_wrap(. ~ region)
+
+comb_market_plot <- ggplot(comb_market, aes(x = date, y = average)) + 
+   geom_line(aes(color = Change), size = 1) +
+   scale_color_manual(values=c('forestgreen','darkred')) +
+   ggtitle("Share of Market-Rate Units with Higher vs. Lower Asking Rents vs. 2/28 Level") + 
+   xlab("") + 
+   ylab("") +
+   labs(color='Change since 2/28:') +
+   scale_y_continuous(labels = scales::percent_format(accuracy = 1), limits = c(0,.9)) +
+   theme_economist() +
+   #scale_colour_economist()+
+   theme(axis.title = element_text(size = rel(1)), axis.text = element_text(size = 10),
+         plot.title = element_text(size=18), panel.spacing.x = unit(5, "mm"),
+         axis.title.x = element_blank(), axis.text.x = element_text(angle=45, hjust = 1, vjust = 1)) +
+   scale_x_bd(business.dates=business_days, max.major.breaks = 15, labels=date_format('%b-%d'))+
+   facet_wrap(. ~ essex_markets)
+
+
+
+comb_reit_plot <- ggplot(comb_reit, aes(x = date, y = average)) + 
+   geom_line(aes(color = Change), size = 1) +
+   scale_color_manual(values=c('forestgreen','darkred')) +
+   ggtitle("Share of Market-Rate Units with Higher vs. Lower Asking Rents vs. 2/28 Level", subtitle = "150+ Unit Properties in Essex Markets Including bottom Quartile") + 
+   xlab("") + 
+   ylab("") +
+   labs(color='Change since 2/28:') +
+   scale_y_continuous(labels = scales::percent_format(accuracy = 1), limits = c(0,1)) +
+   theme_economist() +
+   #scale_colour_economist()+
+   theme(axis.title = element_text(size = rel(1)), axis.text = element_text(size = 10),
+         plot.title = element_text(size=18), panel.spacing.x = unit(5, "mm"),
+         axis.title.x = element_blank(), axis.text.x = element_text(angle=45, hjust = 1, vjust = 1)) +
+   scale_x_bd(business.dates=business_days, max.major.breaks = 15, labels=date_format('%b-%d'))+
+   facet_wrap(. ~ owner_name)
+
+port_data_write = subset(comb_market, comb_market$essex_markets == "ESS Portfolio")
+fwrite(port_data_write, "C:/Users/kplank/Essex Property Trust, Inc/DART - Documents/PULSE/market_high_low.csv")
+
+
+
+
+
+```
+
+```{r line_graph_cum_avg, echo=FALSE, warning=FALSE, results = "asis", fig.width=15, fig.height=3.3}
+
+
+
+cum_avg_ask$region <- as.factor(cum_avg_ask$region)
+cum_avg_ask$date <- ymd(cum_avg_ask$date)
+
+cum_avg_ask_plot <- ggplot(cum_avg_ask, aes(x = date, y = cum_avg_asking_change)) + 
+   geom_line(aes(color = region), size = 1) +
+   ggtitle("Avg. Change in Market Asking Rents since 2/28") + 
+   xlab("") + 
+   ylab("") +
+   scale_y_continuous(labels = scales::percent_format(accuracy = 1), limits = c(min(cum_avg_ask$cum_avg_asking_change)-.005,.015)) +
+   theme_economist() +
+   scale_colour_economist()+
+   theme(axis.title = element_text(size = rel(1)), axis.text = element_text(size = 10),
+         plot.title = element_text(size=18), legend.position = "none", panel.spacing.x = unit(5, "mm"),
+         axis.title.x = element_blank(), axis.text.x = element_text(angle=45, hjust = 1, vjust = 1)) +
+   scale_x_bd(business.dates=business_days, max.major.breaks = 15, labels=date_format('%b-%d'))+
+   facet_wrap(. ~ region)
+
+print(cum_avg_ask_plot)
+
+#ggplotly(cum_avg_ask_plot, tooltip = c("cum_avg_asking_change"))
+
+
+
+cum_avg_eff_plot <- ggplot(cum_avg_ask, aes(x = date, y = cum_avg_effective_change)) + 
+   geom_line(aes(color = region), size = 1) +
+   ggtitle("Avg. Change in Market Effective Rents since 2/28") + 
+   xlab("") + 
+   ylab("") +
+   scale_y_continuous(labels = scales::percent_format(accuracy = 1), limits = c(min(cum_avg_ask$cum_avg_asking_change)-.005,.015)) +
+   theme_economist() +
+   scale_colour_economist()+
+   theme(axis.title = element_text(size = rel(1)), axis.text = element_text(size = 10),
+         plot.title = element_text(size=18), legend.position = "none", panel.spacing.x = unit(5, "mm"),
+         axis.title.x = element_blank(), axis.text.x = element_text(angle=45, hjust = 1, vjust = 1)) +
+   scale_x_bd(business.dates=business_days, max.major.breaks = 15, labels=date_format('%b-%d'))+
+   facet_wrap(. ~ region)
+
+#print(cum_avg_eff_plot)
+```
+
+```{r line_graph_cum_avg_reit, echo=FALSE, warning=FALSE, results = "asis", include = FALSE}
+
+
+cum_avg_ask_reit$date <- ymd(cum_avg_ask_reit$date)
+
+cum_avg_ask_reit_mark$date <- ymd(cum_avg_ask_reit_mark$date)
+
+cum_avg_ask_reit_mark$REIT <- cum_avg_ask_reit_mark$owner_name
+
+cum_avg_ask_reit$owner_name_unit <- as.factor(cum_avg_ask_reit$owner_name_unit)
+
+cum_avg_ask_reit$`REIT & Units` <- cum_avg_ask_reit$owner_name_unit
+
+cum_avg_ask_reit_mark <- subset(cum_avg_ask_reit_mark, cum_avg_ask_reit_mark$owner_name != "Apartment Investment and Management Company")
+
+markets <- levels(cum_avg_ask_reit_mark$essex_markets)
+
+#for (x in markets){
+
+#graph_data <- subset(cum_avg_ask_reit_mark, cum_avg_ask_reit_mark$essex_markets == x)
+   
+cum_avg_ask_reit_mark_plot <- ggplot(cum_avg_ask_reit_mark, aes(x = date, y = cum_avg_asking_change)) + 
+   geom_line(aes(color = REIT), size = 1) +
+   ggtitle("Avg. Change in Market Asking Rents since 2/28 (Competitor Set, ESS Markets Only)") + 
+   xlab("") + 
+   ylab("") +
+   scale_y_continuous(labels = scales::percent_format(accuracy = 1), limits = c(-.095,.04), breaks = seq(-.08, .04, .02)) +
+   theme_economist() +
+   scale_color_manual(values = c("Essex Property Trust, Inc." = "black", "AvalonBay Communities, Inc."="#28B463", "Equity Residential"="#E74C3C", "UDR, Inc."="#CA6F1E", "The Irvine Company"="#1F618D",  "R&V Management"="#336666", "Greystar"="#F7DC6F", "Prometheus Real Estate Group, Inc."= "#DE16F5")) +
+   theme(axis.title = element_text(size = rel(1)), axis.text = element_text(size = 10),
+         plot.title = element_text(size=18), panel.spacing.x = unit(5, "mm"),
+         axis.title.x = element_blank(), axis.text.x = element_text(angle=45, hjust = 1, vjust = 1)) +
+   scale_x_bd(business.dates=business_days, max.major.breaks = 15, labels=date_format('%b-%d'))+
+   facet_wrap(. ~ essex_markets) 
+
+
+cum_avg_eff_reit_mark_plot <- ggplot(cum_avg_ask_reit_mark, aes(x = date, y = cum_avg_effective_change)) + 
+   geom_line(aes(color = REIT), size = 1) +
+   ggtitle("Avg. Change in Market Effective Rents since 2/28 (Competitor Set, ESS Markets Only)") + 
+   xlab("") + 
+   ylab("") +
+   scale_y_continuous(labels = scales::percent_format(accuracy = 1), limits = c(min(cum_avg_ask_reit_mark$cum_avg_asking_change)-.001,.04)) +
+   theme_economist() +
+   scale_color_manual(values = c("Essex Property Trust, Inc." = "black", "AvalonBay Communities, Inc."="#28B463", "Equity Residential"="#E74C3C", "UDR, Inc."="#CA6F1E", "The Irvine Company"="#1F618D",  "R&V Management"="#336666", "Greystar"="#F7DC6F", "Prometheus Real Estate Group, Inc."= "#DE16F5")) +
+   theme(axis.title = element_text(size = rel(1)), axis.text = element_text(size = 10),
+         plot.title = element_text(size=18), panel.spacing.x = unit(5, "mm"),
+         axis.title.x = element_blank(), axis.text.x = element_text(angle=45, hjust = 1, vjust = 1)) +
+   scale_x_bd(business.dates=business_days, max.major.breaks = 15, labels=date_format('%b-%d'))+
+   facet_wrap(. ~ essex_markets) 
+
+#print(cum_avg_ask_reit_mark_plot)
+
+
+#}
+
+
+
+cum_avg_ask_reit_plot <- ggplot(cum_avg_ask_reit, aes(x = date, y = cum_avg_asking_change)) + 
+   geom_line(aes(color = `REIT & Units`), size = 1) +
+   ggtitle("Avg. Change in Asking Rents since 2/28 (REIT Comparison, ESS Markets Only)") + 
+   ylab("") +
+   scale_y_continuous(labels = scales::percent_format(accuracy = 2), limits = c(-.05,.05)) +
+   theme_economist() +
+   scale_colour_economist()+
+   theme(axis.title = element_text(size = rel(1)), axis.text = element_text(size = 10),
+         plot.title = element_text(size=18), legend.position = "none", panel.spacing.x = unit(5, "mm"),
+         axis.title.x = element_blank(), axis.text.x = element_text(angle=45, hjust = 1, vjust = 1)) +
+   scale_x_bd(business.dates=business_days, max.major.breaks = 15, labels=date_format('%b-%d'))+ 
+   facet_wrap(. ~ `REIT & Units`) 
+
+
+cum_avg_eff_reit_plot <- ggplot(cum_avg_ask_reit, aes(x = date, y = cum_avg_effective_change)) + 
+   geom_line(aes(color = `REIT & Units`), size = 1) +
+   ggtitle("Avg. Change in Effective Rents since 2/28 (REIT Comparison, ESS Markets Only)") + 
+   ylab("") +
+   scale_y_continuous(labels = scales::percent_format(accuracy = 2), limits = c(-.05,.05)) +
+   theme_economist() +
+   scale_colour_economist()+
+   theme(axis.title = element_text(size = rel(1)), axis.text = element_text(size = 10),
+         plot.title = element_text(size=18), legend.position = "none", panel.spacing.x = unit(5, "mm"),
+         axis.title.x = element_blank(), axis.text.x = element_text(angle=45, hjust = 1, vjust = 1)) +
+   scale_x_bd(business.dates=business_days, max.major.breaks = 15, labels=date_format('%b-%d'))+ 
+   facet_wrap(. ~ `REIT & Units`) 
+
+#print(cum_avg_ask_reit_plot)
+
+```
+
+```{r line_graph_cum_avg_mark, echo=FALSE, warning=FALSE, results = "asis"}
+
+cum_avg_ask_mark$essex_markets <- as.factor(cum_avg_ask_mark$essex_markets)
+rent_weights <- read.csv("C:/Users/kplank/Essex Property Trust, Inc/Costar Data - Documents/weights/rent_weights.csv")
+
+cum_avg_ask_port <- merge(cum_avg_ask_mark, rent_weights, by.x = "essex_markets", by.y = "market")
+
+cum_avg_ask_port <- cum_avg_ask_port %>% group_by(date) %>% 
+   mutate(cum_avg_asking_change_wt = cum_avg_asking_change*rent_weight,
+          cum_avg_effective_change_wt = cum_avg_effective_change*rent_weight) %>% 
+   summarise(cum_avg_asking_change = sum(cum_avg_asking_change_wt),
+             cum_avg_effective_change = sum(cum_avg_effective_change_wt)) %>%
+   ungroup()
+
+cum_avg_ask_mark$date <- ymd(cum_avg_ask_mark$date)
+
+cum_avg_ask_port$essex_markets <- "ESS Portfolio (Rent Weighted)"
+cum_avg_ask_port$essex_markets <- as.factor(cum_avg_ask_port$essex_markets)
+cum_avg_ask_port$date <- ymd(cum_avg_ask_port$date)
+
+cum_avg_ask_mark <- rbind(cum_avg_ask_mark, cum_avg_ask_port)
+
+
+comb_market$essex_markets <- factor(comb_market$essex_markets , levels = c("Los Angeles", "Orange", "San Diego",
+                                                                           "San Francisco", "Oakland", "San Jose",
+                                                                           "Seattle", "Ventura", "ESS Portfolio"))
+
+cum_avg_ask_mark_plot <- ggplot(cum_avg_ask_mark, aes(x = date, y = cum_avg_asking_change)) + 
+   geom_line(aes(color = essex_markets), size = 1) +
+   ggtitle("Avg. Change in Market Asking Rents since 2/28") + 
+   xlab("") + 
+   ylab("") +
+   scale_y_continuous(labels = scales::percent_format(accuracy = 1), limits = c(-.02,.02)) +
+   theme_economist() +
+   scale_colour_economist()+
+   theme(axis.title = element_text(size = rel(1)), axis.text = element_text(size = 10),
+         plot.title = element_text(size=18), legend.position = "none", panel.spacing.x = unit(5, "mm"),
+         axis.title.x = element_blank(), axis.text.x = element_text(angle=45, hjust = 1, vjust = 1)) +
+   scale_x_bd(business.dates=business_days, max.major.breaks = 15, labels=date_format('%b-%d'))+
+   facet_wrap(. ~ essex_markets)
+
+
+cum_avg_eff_mark_plot <- ggplot(cum_avg_ask_mark, aes(x = date, y = cum_avg_effective_change)) + 
+   geom_line(aes(color = essex_markets), size = 1) +
+   ggtitle("Avg. Change in Market Effective Rents since 2/28") + 
+   xlab("") + 
+   ylab("") +
+   scale_y_continuous(labels = scales::percent_format(accuracy = 1), limits = c(min(cum_avg_ask_mark$cum_avg_effective_change)-.005,.02), breaks = c(.02, 0, -.02, -.04)) +
+   theme_economist() +
+   scale_colour_economist()+
+   theme(axis.title = element_text(size = rel(1)), axis.text = element_text(size = 10),
+         plot.title = element_text(size=18), legend.position = "none", panel.spacing.x = unit(5, "mm"),
+         axis.title.x = element_blank(), axis.text.x = element_text(angle=45, hjust = 1, vjust = 1)) +
+   scale_x_bd(business.dates=business_days, max.major.breaks = 15, labels=date_format('%b-%d'))+
+   facet_wrap(. ~ essex_markets)
+#print(cum_avg_ask_mark_plot)
+
+```
+
+```{r room_analysis, echo=FALSE, warning=FALSE, results = "asis"}
+
+
+
+
+#----
+# market_name <- levels(as.factor(changes$market_name))
+# essex_markets <- c("Oakland", "Orange", "Los Angeles", "San Francisco", "Orange", "San Diego", "San Francisco",
+#                     "Ventura", "San Jose", "Seattle", "San Jose")
+# # 
+# marx <- data.frame(market_name, essex_markets)
+# changes <- merge(changes, marx, by = "market_name")
+# changes$essex_markets <- as.character(changes$essex_markets)
+# changes$essex_markets <- ifelse(changes$county_name == "Ventura", "Ventura", changes$essex_markets)
+# changes$essex_markets <- as.factor(changes$essex_markets)
+# rm(marx)
+#----
+
+x <- df_rooms
+
+df_rooms <- x
+df_rooms_port <- x
+
+df_rooms %<>% filter(date %in% "2020-02-28") %>% 
+   select(property_id, one_bedroom_asking_rent_unit_fl=one_bedroom_asking_rent_unit,
+          two_bedroom_asking_rent_unit_fl = two_bedroom_asking_rent_unit,
+          studio_asking_rent_unit_fl = studio_asking_rent_unit) %>%
+   merge(changes, by = "property_id") %>%
+   select(date, essex_markets, owner_name, property_id, one_bedroom_asking_rent_unit_fl,
+          two_bedroom_asking_rent_unit_fl, studio_asking_rent_unit_fl,
+          one_bedroom_asking_rent_unit, two_bedroom_asking_rent_unit,
+          studio_asking_rent_unit, number_of_1_bedrooms_units,
+          number_of_2_bedrooms_units, number_of_studios_units) %>%
+   mutate(one_bedroom_asking_rent_unit_pct_change=(one_bedroom_asking_rent_unit - one_bedroom_asking_rent_unit_fl)/one_bedroom_asking_rent_unit_fl,
+          two_bedroom_asking_rent_unit_pct_change=(two_bedroom_asking_rent_unit - two_bedroom_asking_rent_unit_fl)/two_bedroom_asking_rent_unit_fl,
+          studio_asking_rent_unit_pct_change=(studio_asking_rent_unit - studio_asking_rent_unit_fl)/studio_asking_rent_unit_fl)
+
+
+
+df_rooms_mark <- df_rooms %>% group_by(essex_markets, date) %>%
+   mutate(number_of_1_bedrooms_units_total = sum(number_of_1_bedrooms_units, na.rm=TRUE),
+          number_of_2_bedrooms_units_total = sum(number_of_2_bedrooms_units, na.rm=TRUE),
+          number_of_studios_units_total = sum(number_of_studios_units, na.rm=TRUE)) %>%
+   mutate(one_bed_wt = number_of_1_bedrooms_units/number_of_1_bedrooms_units_total,
+          two_bed_wt = number_of_2_bedrooms_units/number_of_2_bedrooms_units_total,
+          studio_wt = number_of_studios_units/number_of_studios_units_total) %>%
+   mutate(one_bedroom_asking_rent_unit_pct_change_wt = one_bed_wt*one_bedroom_asking_rent_unit_pct_change,
+          two_bedroom_asking_rent_unit_pct_change_wt = two_bed_wt*two_bedroom_asking_rent_unit_pct_change,
+          studio_asking_rent_unit_pct_change_wt=studio_wt*studio_asking_rent_unit_pct_change) %>%
+   summarise(studio_asking_rent_unit_pct_change_mean = sum(studio_asking_rent_unit_pct_change_wt, na.rm=TRUE),
+             one_bedroom_asking_rent_unit_pct_change_mean = sum(one_bedroom_asking_rent_unit_pct_change_wt, na.rm=TRUE),
+             two_bedroom_asking_rent_unit_pct_change_mean = sum(two_bedroom_asking_rent_unit_pct_change_wt, na.rm=TRUE)) %>% ungroup()
+
+
+
+# read in market rent weights to apply to essex portfolio
+#----
+rent_weights <- read.csv("C:/Users/kplank/Essex Property Trust, Inc/Costar Data - Documents/weights/rent_weights.csv")
+
+market_name <- levels(as.factor(changes$market_name))
+essex_markets <- c("Oakland", "Orange", "Los Angeles", "San Francisco", "Orange", "San Diego", "San Francisco", "Ventura", "San Jose", "Seattle", "San Jose")
+marx <- data.frame(market_name, essex_markets)
+df_rooms_port <- merge(df_rooms_port, marx, by = "market_name")
+df_rooms_port$essex_markets <- as.character(df_rooms_port$essex_markets)
+df_rooms_port$essex_markets <- ifelse(df_rooms_port$county_name == "Ventura", "Ventura", df_rooms_port$essex_markets)
+df_rooms_port$essex_markets <- as.factor(df_rooms_port$essex_markets)
+rm(marx)
+
+df_rooms_port <- merge(df_rooms_port, rent_weights, by.x = "essex_markets", by.y = "market")
+#----
+
+df_rooms_port <- df_rooms_port %>% filter(date %in% "2020-02-28") %>% 
+   select(property_id,
+          one_bedroom_asking_rent_unit_fl=one_bedroom_asking_rent_unit,
+          two_bedroom_asking_rent_unit_fl = two_bedroom_asking_rent_unit,
+          studio_asking_rent_unit_fl = studio_asking_rent_unit, rent_weight) %>%
+   merge(changes, by = "property_id") %>%
+   select(date, owner_name, property_id, one_bedroom_asking_rent_unit_fl,
+          two_bedroom_asking_rent_unit_fl, studio_asking_rent_unit_fl,
+          one_bedroom_asking_rent_unit, two_bedroom_asking_rent_unit,
+          studio_asking_rent_unit, number_of_1_bedrooms_units,
+          number_of_2_bedrooms_units, number_of_studios_units, rent_weight) %>%
+   mutate(one_bedroom_asking_rent_unit_pct_change=(one_bedroom_asking_rent_unit - one_bedroom_asking_rent_unit_fl)/one_bedroom_asking_rent_unit_fl,
+          two_bedroom_asking_rent_unit_pct_change=(two_bedroom_asking_rent_unit - two_bedroom_asking_rent_unit_fl)/two_bedroom_asking_rent_unit_fl,
+          studio_asking_rent_unit_pct_change=(studio_asking_rent_unit - studio_asking_rent_unit_fl)/studio_asking_rent_unit_fl)
+
+
+
+
+
+df_rooms_port <- df_rooms_port %>% group_by(date) %>%
+   mutate(number_of_1_bedrooms_units_total = sum(number_of_1_bedrooms_units, na.rm=TRUE),
+          number_of_2_bedrooms_units_total = sum(number_of_2_bedrooms_units, na.rm=TRUE),
+          number_of_studios_units_total = sum(number_of_studios_units, na.rm=TRUE)) %>%
+   mutate(one_bed_wt = number_of_1_bedrooms_units/number_of_1_bedrooms_units_total,
+          two_bed_wt = number_of_2_bedrooms_units/number_of_2_bedrooms_units_total,
+          studio_wt = number_of_studios_units/number_of_studios_units_total) %>%
+   mutate(one_bedroom_asking_rent_unit_pct_change_wt = one_bed_wt*one_bedroom_asking_rent_unit_pct_change,
+          two_bedroom_asking_rent_unit_pct_change_wt = two_bed_wt*two_bedroom_asking_rent_unit_pct_change,
+          studio_asking_rent_unit_pct_change_wt=studio_wt*studio_asking_rent_unit_pct_change) %>%
+   summarise(studio_asking_rent_unit_pct_change_mean = sum(studio_asking_rent_unit_pct_change_wt, na.rm=TRUE),
+             one_bedroom_asking_rent_unit_pct_change_mean = sum(one_bedroom_asking_rent_unit_pct_change_wt, na.rm=TRUE),
+             two_bedroom_asking_rent_unit_pct_change_mean = sum(two_bedroom_asking_rent_unit_pct_change_wt, na.rm=TRUE)) %>% ungroup()
+
+df_rooms_port$essex_markets <- "ESS Portfolio"
+df_rooms_port$essex_markets <- as.factor(df_rooms_port$essex_markets)
+
+
+df_rooms_mark_wt <- merge(df_rooms_mark, rent_weights, by.x = "essex_markets", by.y = "market")
+
+df_rooms_mark_wt %<>% mutate(studio_asking_rent_unit_pct_change_mean_wt =studio_asking_rent_unit_pct_change_mean*rent_weight,      one_bedroom_asking_rent_unit_pct_change_mean_wt = one_bedroom_asking_rent_unit_pct_change_mean*rent_weight,
+two_bedroom_asking_rent_unit_pct_change_mean_wt = two_bedroom_asking_rent_unit_pct_change_mean*rent_weight) %>% 
+   group_by(date) %>% 
+   summarise(studio_asking_rent_unit_pct_change_mean = sum(studio_asking_rent_unit_pct_change_mean_wt),
+             one_bedroom_asking_rent_unit_pct_change_mean = sum(one_bedroom_asking_rent_unit_pct_change_mean_wt), two_bedroom_asking_rent_unit_pct_change_mean = sum(two_bedroom_asking_rent_unit_pct_change_mean_wt))
+
+df_rooms_mark_wt$essex_markets <- "ESS Portfolio (Rent Weighted)"
+df_rooms_mark_wt$essex_markets <- as.factor(df_rooms_mark_wt$essex_markets)
+
+
+             
+df_rooms_mark <- rbind(df_rooms_mark, df_rooms_mark_wt)
+#df_rooms_mark <- rbind(df_rooms_mark, df_rooms_port)
+
+
+df_rooms_mark %<>% melt(id=c("date","essex_markets"))
+
+reits <- c("Essex Property Trust, Inc.", "AvalonBay Communities, Inc.", "Equity Residential", "UDR, Inc.", "The Irvine Company", "Apartment Investment and Management Company",  "R&V Management", "Greystar", "Prometheus Real Estate Group, Inc.")
+df_rooms_reit <- df_rooms %>% filter(owner_name %in% reits)
+
+df_rooms_aimco <- df_rooms_reit %>% filter(owner_name == "Apartment Investment and Management Company")
+
+fwrite(df_rooms_aimco, "C:/Users/kplank/Essex Property Trust, Inc/Costar Data - Documents/aimco_data.csv")
+
+df_rooms_reit %<>% group_by(owner_name, date) %>%
+   mutate(number_of_1_bedrooms_units_total = sum(number_of_1_bedrooms_units, na.rm=TRUE),
+          number_of_2_bedrooms_units_total = sum(number_of_2_bedrooms_units, na.rm=TRUE),
+          number_of_studios_units_total = sum(number_of_studios_units, na.rm=TRUE)) %>%
+   mutate(one_bed_wt = number_of_1_bedrooms_units/number_of_1_bedrooms_units_total,
+          two_bed_wt = number_of_2_bedrooms_units/number_of_2_bedrooms_units_total,
+          studio_wt = number_of_studios_units/number_of_studios_units_total) %>%
+   mutate(one_bedroom_asking_rent_unit_pct_change_wt = one_bed_wt*one_bedroom_asking_rent_unit_pct_change,
+          two_bedroom_asking_rent_unit_pct_change_wt = two_bed_wt*two_bedroom_asking_rent_unit_pct_change,
+          studio_asking_rent_unit_pct_change_wt=studio_wt*studio_asking_rent_unit_pct_change) %>%
+   summarise(studio_asking_rent_unit_pct_change_mean = sum(studio_asking_rent_unit_pct_change_wt, na.rm=TRUE),
+             one_bedroom_asking_rent_unit_pct_change_mean = sum(one_bedroom_asking_rent_unit_pct_change_wt, na.rm=TRUE),
+             two_bedroom_asking_rent_unit_pct_change_mean = sum(two_bedroom_asking_rent_unit_pct_change_wt, na.rm=TRUE))
+
+df_rooms_reit %<>% melt(id=c("date","owner_name"))
+
+
+
+
+# add new room data to old all avg asking rent data
+# Market
+cum_avg_ask_mark$variable = "Avg. Asking Rent (All Units)" # all unit type data
+df_rooms_mark$var <- ifelse(df_rooms_mark$variable ==  "studio_asking_rent_unit_pct_change_mean", "Studio", ifelse(df_rooms_mark$variable == "one_bedroom_asking_rent_unit_pct_change_mean", "1 Bedroom", "2 Bedroom"))
+df_rooms_mark %<>% select(date, essex_markets,  variable = var, cum_avg_asking_change = value)
+df_rooms_mark$date <- ymd(df_rooms_mark$date)
+cum_avg_eff_mark <- cum_avg_ask_mark %>% select(date, cum_avg_effective_change)
+cum_avg_ask_mark %<>% select(-cum_avg_effective_change)
+cum_avg_ask_mark <- rbind(cum_avg_ask_mark, df_rooms_mark)
+cum_avg_ask_mark$variable <- as.factor(cum_avg_ask_mark$variable)
+
+
+#Reit
+cum_avg_ask_reit$variable = "Avg. Asking Rent (All Units)"
+cum_avg_ask_reit %<>% select(date, owner_name, owner_name_unit , cum_avg_asking_change, variable)
+df_rooms_reit$var <- ifelse(df_rooms_reit$variable ==  "studio_asking_rent_unit_pct_change_mean", "Studio", ifelse(df_rooms_reit$variable == "one_bedroom_asking_rent_unit_pct_change_mean", "1 Bedroom", "2 Bedroom"))
+df_rooms_reit %<>% select(date, owner_name, variable = var, cum_avg_asking_change = value)
+
+reit_unit <- as.character(levels(cum_avg_ask_reit$owner_name_unit))
+reit_name <- as.character(levels(as.factor(as.character(cum_avg_ask_reit$owner_name))))
+reit_name_unit <- data.frame(reit_unit, reit_name)
+
+df_rooms_reit <- merge(df_rooms_reit, reit_name_unit, by.x = "owner_name", by.y = "reit_name")
+df_rooms_reit %<>% select(date, owner_name, owner_name_unit=reit_unit, variable, cum_avg_asking_change)
+
+df_rooms_reit$date <- ymd(df_rooms_reit$date)
+
+cum_avg_ask_reit <- rbind(cum_avg_ask_reit, df_rooms_reit)
+cum_avg_ask_reit$variable <- as.factor(cum_avg_ask_reit$variable)
+cum_avg_ask_reit$`REIT: Type & Units` <- cum_avg_ask_reit$owner_name_unit
+
+
+
+
+#charts
+#cum_avg_ask_mark <- subset(cum_avg_ask_mark, cum_avg_ask_mark$essex_markets != "Ventura" & cum_avg_ask_mark$variable != "Studio")
+
+cum_avg_ask_mark <- cum_avg_ask_mark[!(cum_avg_ask_mark$essex_markets == "Ventura" & cum_avg_ask_mark$variable == "Studio" ),]
+
+
+
+
+
+cum_avg_ask_mark$Type <- cum_avg_ask_mark$variable
+cum_avg_ask_mark_plot <- ggplot(cum_avg_ask_mark, aes(x = date, y = cum_avg_asking_change)) + 
+   geom_line(aes(color = Type), size = 1) +
+   ggtitle("Avg. Change in Market Asking Rents since 2/28") + 
+   xlab("") + 
+   ylab("") +
+   scale_y_continuous(labels = scales::percent_format(accuracy = 1), limits = c(min(cum_avg_ask_mark$cum_avg_asking_change)-.005,.015),
+                      breaks=c(0,-.02, -.04, -.06, -.08)) +
+   theme_economist() +
+   scale_color_manual(values = c("Avg. Asking Rent (All Units)" = "#001133", "1 Bedroom"="#938DD2", "2 Bedroom" = "#008BBC", "Studio" = "#90353B")) +
+   theme(axis.title = element_text(size = rel(1)), axis.text = element_text(size = 10),
+         plot.title = element_text(size=18), panel.spacing.x = unit(5, "mm"),
+         axis.title.x = element_blank(), axis.text.x = element_text(angle=45, hjust = 1, vjust = 1)) +
+   scale_x_bd(business.dates=business_days, max.major.breaks = 15, labels=date_format('%b-%d'))+
+   facet_wrap(. ~ essex_markets)
+
+
+#Earnings Chart ----
+# fwrite(cum_avg_ask_mark, "C:/Users/kplank/Essex Property Trust, Inc/Costar Data - Documents/alternate_chart_data/earnings_cum_change.csv")
+# cum_avg_ask_mark_plot <- ggplot(cum_avg_ask_mark, aes(x = date, y = cum_avg_asking_change)) + 
+#    geom_line(aes(color = Type), size = 1) +
+#    ggtitle("") + 
+#    xlab("") + 
+#    ylab("") +
+#    scale_y_continuous(labels = scales::percent_format(accuracy = 1), limits = c(min(cum_avg_ask_mark$cum_avg_asking_change)-.005,.015)) +
+#    theme_calc() +
+#    scale_colour_brewer(palette = "Set1") +
+#    #scale_color_manual(values = c("Avg. Asking Rent (All Units)" = "black", "1 Bedroom"="brown1", "2 Bedroom" = "royalblue2", "Studio" = "springgreen3")) +
+#    theme(axis.title = element_text(size = rel(1)), axis.text = element_text(size = 14),
+#          plot.title = element_text(size=24), panel.spacing.x = unit(5, "mm"),
+#          axis.title.x = element_blank(), axis.text.x = element_text(angle=45, hjust = 1, vjust = 1)) +
+#    scale_x_bd(business.dates=business_days, max.major.breaks = 10, labels=date_format('%d-%b'))+
+#    facet_wrap(. ~ essex_markets)
+#----
+
+
+cum_avg_ask_reit$`REIT: Type & Units` <- as.factor(cum_avg_ask_reit$`REIT: Type & Units`)
+
+cum_avg_ask_reit$Type <- cum_avg_ask_reit$variable
+
+cum_avg_ask_reit_one <- cum_avg_ask_reit
+
+cum_avg_ask_reit_one <- subset(cum_avg_ask_reit_one, cum_avg_ask_reit_one$variable == "Avg. Asking Rent (All Units)")
+
+cum_avg_ask_reit_plot_one <- ggplot(cum_avg_ask_reit_one, aes(x = date, y = cum_avg_asking_change)) + 
+   geom_line(aes(color = Type), size = 1) +
+   ggtitle("Avg. Change in Asking Rents since 2/28 (Competitor Set, ESS Markets Only)") + 
+   ylab("") +
+   scale_y_continuous(labels = scales::percent_format(accuracy = 2), limits = c(-.06,.02), breaks = c(.02, 0, -.02, -.04, -.06)) +
+   theme_economist() +
+   scale_color_manual(values = c("Avg. Asking Rent (All Units)" = "#001133")) +
+   theme(axis.title = element_text(size = rel(1)), axis.text = element_text(size = 10),
+         plot.title = element_text(size=18), panel.spacing.x = unit(5, "mm"),
+         axis.title.x = element_blank(), axis.text.x = element_text(angle=45, hjust = 1, vjust = 1)) +
+   scale_x_bd(business.dates=business_days, max.major.breaks = 15, labels=date_format('%b-%d'))+ 
+   facet_wrap(. ~ `REIT: Type & Units`) 
+
+
+cum_avg_eff_reit_plot_one <- ggplot(cum_avg_ask_reit_one, aes(x = date, y = cum_avg_effective_change)) + 
+   geom_line(aes(color = Type), size = 1) +
+   ggtitle("Avg. Change in Asking Rents since 2/28 (Competitor Set, ESS Markets Only)") + 
+   ylab("") +
+   scale_y_continuous(labels = scales::percent_format(accuracy = 2), limits = c(-.05,.02)) +
+   theme_economist() +
+   scale_color_manual(values = c("Avg. Asking Rent (All Units)" = "#001133")) +
+   theme(axis.title = element_text(size = rel(1)), axis.text = element_text(size = 10),
+         plot.title = element_text(size=18), panel.spacing.x = unit(5, "mm"),
+         axis.title.x = element_blank(), axis.text.x = element_text(angle=45, hjust = 1, vjust = 1)) +
+   scale_x_bd(business.dates=business_days, max.major.breaks = 15, labels=date_format('%b-%d'))+ 
+   facet_wrap(. ~ `REIT: Type & Units`) 
+
+
+
+reits_small <- c("Essex Property Trust, Inc.", "AvalonBay Communities, Inc.", "Equity Residential", "UDR, Inc.", "The Irvine Company", "Apartment Investment and Management Company")
+cum_avg_ask_reit %<>% filter(owner_name %in% reits_small)
+
+
+
+
+
+
+cum_avg_ask_reit_plot <- ggplot(cum_avg_ask_reit, aes(x = date, y = cum_avg_asking_change)) + 
+   geom_line(aes(color = Type), size = 1) +
+   ggtitle("Avg. Change in Asking Rents since 2/28 (REIT Comparison, ESS Markets Only)") + 
+   ylab("") +
+   scale_y_continuous(labels = scales::percent_format(accuracy = 2), limits = c(min(cum_avg_ask_reit$cum_avg_asking_change)-.01,.02), breaks = c(.02, 0, -.02, -.04, -.06, -.08, -.1)) +
+   theme_economist() +
+   scale_color_manual(values = c("Avg. Asking Rent (All Units)" = "#001133", "1 Bedroom"="#938DD2", "2 Bedroom" = "#008BBC", "Studio" = "#90353B")) +
+   theme(axis.title = element_text(size = rel(1)), axis.text = element_text(size = 10),
+         plot.title = element_text(size=18), panel.spacing.x = unit(5, "mm"),
+         axis.title.x = element_blank(), axis.text.x = element_text(angle=45, hjust = 1, vjust = 1)) +
+   scale_x_bd(business.dates=business_days, max.major.breaks = 15, labels=date_format('%b-%d'))+ 
+   facet_wrap(. ~ `REIT: Type & Units`) 
+
+
+#print chtars
+
+
+print(cum_avg_ask_mark_plot)
+#print(cum_avg_eff_mark_plot)
+print(cum_avg_ask_reit_plot_one)
+print(cum_avg_ask_reit_plot)
+
+```
+
+```{r outlier_analysis, echo=FALSE, warning=FALSE, results = "asis", fig.width=15, fig.height=3.3, include = FALSE}
+# Select Property ids that have a change larger than 5% since 2/28
+#outlier_ids <- df_outliers$property_id
+
+# Add Essex Markets
+#----
+# market_name <- levels(as.factor(changes$market_name))
+# essex_markets <- c("Oakland", "Orange", "Los Angeles", "San Francisco", "Orange", "San Diego", "San Francisco",
+#                     "Ventura", "San Jose", "Seattle", "San Jose")
+# marx <- data.frame(market_name, essex_markets)
+# df_outliers <- merge(df_outliers, marx, by = "market_name")
+# df_outliers$essex_markets <- as.character(df_outliers$essex_markets)
+# df_outliers$essex_markets <- ifelse(df_outliers$county_name == "Ventura", "Ventura", df_outliers$essex_markets)
+# df_outliers$essex_markets <- as.factor(df_outliers$essex_markets)
+# #----
+# 
+# 
+# # Select important variables
+# df_outliers %<>% select(essex_markets, property_name, property_id, avg_asking_unit, avg_asking_unit_fl, percent_avg_asking_rent_change_fl)
+# df_outliers$eproperty_id <- as.factor(df_outliers$eproperty_id)
+# 
+# markets <- levels(df_outliers$essex_markets)
+# for (x in markets) {
+# print(x)# star_sub <- subset(df_outliers, df_outliers$essex_markets == x)
+# star <- stargazer(star_sub, type = "text")
+# 
+# 
+# }
+# 
+
+
+```
+
+```{r outlier_analysis_plot, echo=FALSE, warning=FALSE, results = "asis"}
+#df_outlier
+#print(cum_avg_ask_reit_plot)
+
+print(cum_avg_ask_reit_mark_plot)
+#print(cum_avg_eff_reit_mark_plot)
+```
+
+
+
+
+```{r line_graph_comb_region_plot, echo=FALSE, warning=FALSE, results = "asis", fig.width=15, fig.height=3.3}
+
+
+print(comb_region_plot)
+```
+
+```{r line_graph_comb_market_plot, echo=FALSE, warning=FALSE, results = "asis"}
+print(comb_market_plot)
+
+print(comb_reit_plot)
+
+#print(cum_avg_ask_reit_plot)
+
+#print(cum_avg_ask_reit_mark_plot)
+
+
+```
+
+
+```{r line_graph, echo=FALSE, warning=FALSE, results = "asis", fig.width=15, fig.height=3.3}
+
+# Descriptive stats
+#stargazer(market_ts, type = "text")
+
+market_ts$date <- ymd(as.character(market_ts$date))
+
+portfolio_ts$date <- ymd(as.character(portfolio_ts$date))
+
+portfolio_ts$essex_markets <- "Portfolio"
+
+portfolio_ts$essex_markets <- as.factor(portfolio_ts$essex_markets)
+
+market_ts <- rbind(market_ts, portfolio_ts)
+
+market_ts$Market <- market_ts$essex_markets
+
+region_ts$date <- ymd(as.character(region_ts$date))
+region_ts$Region <- region_ts$region
+
+fwrite(market_ts, paste0("C:/Users/kplank/Essex Property Trust, Inc/Costar Data - Documents/market_ts/market_ts_powerbi", curr, ".csv"))
+
+fwrite(market_ts, "C:/Users/kplank/Essex Property Trust, Inc/Costar Data - Documents/market_ts/market_ts_powerbi.csv")
+
+fwrite(market_ts, "C:/Users/kplank/Essex Property Trust, Inc/DART - Documents/PULSE/market_ts_powerbi.csv")
+
+fwrite(region_ts, paste0("C:/Users/kplank/Essex Property Trust, Inc/Costar Data - Documents/market_ts/region_ts_powerbi", curr, ".csv"))
+
+fwrite(region_ts, "C:/Users/kplank/Essex Property Trust, Inc/DART - Documents//PULSE/region_ts_powerbi.csv")
+
+reg_plot <- ggplot(region_ts, aes(x = date, y = average)) + 
+   geom_line(aes(color = Region), size = 1) +
+   ggtitle("Daily % of Units with a Change in Asking Rent since 2/28") + 
+   xlab("") + 
+   ylab("% of Units with a Rent Decrease") +
+   scale_y_continuous(labels = scales::percent_format(accuracy = 1), limits = c(0,.7)) +
+   theme_economist() +
+   scale_colour_economist()+
+   theme(axis.title = element_text(size = rel(1)), axis.text = element_text(size = 12),
+         plot.title = element_text(size=18), legend.position = "none", panel.spacing.x = unit(5, "mm"), axis.text.x = element_text(angle=45, hjust = 1, vjust = 1)) +
+   facet_wrap(. ~ Region)
+
+#print(reg_plot)
+```
+
+
+```{r line_graph_2, echo=FALSE, warning=FALSE, results = "asis"}
+mark_plot <- ggplot(market_ts, aes(x = date, y = average)) + 
+   geom_line(aes(color = Market), size = 1) +
+   ggtitle("Daily % of Units with a Decrease in Asking Rent Since 2/28") + 
+   xlab("") + 
+   ylab("% of Units with a Rent Decrease") +
+   scale_y_continuous(labels = scales::percent_format(accuracy = 1), limits = c(0,.7)) +
+   theme_economist() +
+   scale_colour_economist()+
+   theme(axis.title = element_text(size = rel(2)), axis.text = element_text(size = 12),
+         plot.title = element_text(size=18), legend.position = "none", panel.spacing.x = unit(5, "mm"), axis.text.x = element_text(angle=45, hjust = 1, vjust = 1)) +
+   facet_wrap(. ~ Market)
+
+#print(mark_plot)
+
+
+#rm(market_ts)
+
+
+```
+
+
+
+```{r box_plot_region_data, echo=FALSE, warning = FALSE, include = FALSE}
+
+# market_name <- levels(as.factor(changes$market_name))
+# essex_markets <- c("Oakland", "Orange", "Los Angeles", "San Francisco", "Orange", "San Diego", "San Francisco",
+#                    "Ventura", "San Jose", "Seattle", "San Jose")
+# 
+# marx <- data.frame(market_name, essex_markets)
+# 
+# df_rents_fl_by_unit <- merge(df_rents_fl_by_unit, marx, by = "market_name")
+# 
+# df_rents_fl_by_unit$essex_markets <- as.character(df_rents_fl_by_unit$essex_markets)
+# 
+# df_rents_fl_by_unit$essex_markets <- ifelse(df_rents_fl_by_unit$county_name == "Ventura", "Ventura", df_rents_fl_by_unit$essex_markets)
+# 
+# rm(marx)
+# 
+
+
+```
+
+```{r box_plot_region, echo=FALSE, warning = FALSE}
+
+df_rents_fl_by_unit$region <- ifelse(df_rents_fl_by_unit$essex_markets == "Seattle", "PNW", ifelse(df_rents_fl_by_unit$essex_markets == "San Francisco" | df_rents_fl_by_unit$essex_markets == "San Jose" | df_rents_fl_by_unit$essex_markets == "Oakland", "NorCal", "SoCal"))
+
+df_rents_fl_by_unit$region <- as.factor(df_rents_fl_by_unit$region)
+
+reg <- levels(df_rents_fl_by_unit$region)
+
+
+# 
+ for (x in reg){
+#   
+bp_data <- subset(df_rents_fl_by_unit, df_rents_fl_by_unit$region == x)
+# 
+
+p <- ggplot(bp_data, aes(y = percent_avg_asking_rent_change_fl, x = initial_rent_quant_clean)) +
+  geom_boxplot(aes(middle = mean(percent_avg_asking_rent_change_fl))) +
+  scale_y_continuous(labels=scales::percent_format(accuracy = 1), limits = c(-.06,.06)) +
+  ggtitle(paste("Rent Change since 2/28: Initial Rent & Region Breakdown", x)) + 
+  xlab("Initial Rent Quartile") + 
+  ylab("% Rent Change") +
+  ggthemes::theme_economist() +
+  ggthemes::scale_colour_economist() +
+  coord_flip() +
+  theme(axis.title = element_text(size = rel(2)), axis.text = element_text(size = 12), plot.title = element_text(size=18)) +
+  geom_hline(yintercept=0, linetype="dashed", 
+                color = "black", size=1) +
+  theme(legend.position="none", panel.spacing.x = unit(5, "mm"))
+
+#print(p)
+ 
+# print(levels(bp_data$initial_rent_quant))
+
+bp_data %<>% select(region, property_name, avg_asking_unit_diff_fl, avg_asking_unit_diff_fl, avg_asking_one_bed_fl, avg_asking_one_bedroom_unit_diff_fl, initial_rent_quant_clean)
+
+#fwrite(bp_data, paste0("C:/Users/kplank/Essex Property Trust, Inc/Costar Data - Documents/archived/misc/region_data", x, ".csv"))
+
+
+}
+
+```
+
+```{r spatial_stuff, echo=FALSE, warning = FALSE, include = FALSE}
+
+ca_bg <- st_read("E:/Projects_network/HeadRoomAnalysis/spatial_data/tl_2019_06_bg.shp", stringsAsFactors = FALSE)
+wa_bg <- st_read("E:/Projects_network/HeadRoomAnalysis/spatial_data/tl_2019_53_bg.shp", stringsAsFactors = FALSE)
+
+bg <- rbind(ca_bg, wa_bg)
+bg %<>% select(GEOID, geometry)
+rm(ca_bg, wa_bg)
+
+adp <- read.csv("E:/Projects_network/HeadRoomAnalysis/spatial_data/adp_hourly.csv")
+
+adp %<>% select(home_block_group,PctHourly)
+
+adp$home_block_group <- str_pad(adp$home_block_group, 12, pad = "0")
+
+sf_rents_adp = st_as_sf(df_rents_fl_by_unit, coords = c("longitude", "latitude"), 
+                 crs = 4269, agr = "constant")
+
+st_crs(sf_rents_adp) = st_crs(bg)
+
+sf_rents_adp <- st_intersection(sf_rents_adp, bg)
+
+sf_rents_adp <- merge(sf_rents_adp, adp, by.x = "GEOID", by.y = "home_block_group")
+
+sf_rents_adp <- as.data.frame(sf_rents_adp)
+
+
+```
+
+```{r spatial_viz, echo=FALSE, warning = FALSE}
+reg <- levels(sf_rents_adp$region)
+
+ for (x in reg){
+#   
+bp_data <- subset(sf_rents_adp, sf_rents_adp$region == x)
+# 
+bp_data$initial_rent_quant <- gtools::quantcut(bp_data$PctHourly, q=4, na.rm=TRUE)
+# # 
+# 
+# 
+ bp_data$initial_rent_quant_clean <- ifelse(bp_data$initial_rent_quant == levels(bp_data$initial_rent_quant)[1], "0-25%", ifelse(bp_data$initial_rent_quant == levels(bp_data$initial_rent_quant)[2], "25-50%", ifelse(bp_data$initial_rent_quant == levels(bp_data$initial_rent_quant[3]), "50-75%", "75%-100%")))
+# # 
+# 
+ bp_data$initial_rent_quant_clean <- as.factor(bp_data$initial_rent_quant_clean)
+# 
+# 
+ bp_data$initial_rent_quant_clean <- factor(bp_data$initial_rent_quant_clean, levels = c("0-25%", "25-50%", "50-75%",
+                                                                            "75%-100%"))
+
+p <- ggplot(bp_data, aes(y = percent_avg_asking_rent_change_fl, x = initial_rent_quant_clean)) +
+  geom_boxplot(aes(middle = mean(percent_avg_asking_rent_change_fl))) +
+  scale_y_continuous(labels=scales::percent_format(accuracy = 1), limits = c(-.06,.06)) +
+  ggtitle(paste("Rent Change since 2/28: Hourly Workers Quartile & Region Breakdown", x)) + 
+  xlab("% Hourly Workers Quartile") + 
+  ylab("% Rent Change") +
+  ggthemes::theme_economist() +
+  ggthemes::scale_colour_economist() +
+  coord_flip() +
+  theme(axis.title = element_text(size = rel(2)), axis.text = element_text(size = 12), plot.title = element_text(size=18)) +
+  geom_hline(yintercept=0, linetype="dashed", 
+                color = "black", size=1) +
+  theme(legend.position="none", panel.spacing.x = unit(5, "mm"))
+
+#print(p)
+ 
+#print(levels(bp_data$initial_rent_quant))
+
+}
+
+```
+
+
+
+
+
+```{r plots_markets_1, echo=FALSE, warning = FALSE}
+
+# GGPLOT HISTOGRAM NON-ZERO FIRST V. LAST % CHANGE
+#percent_avg_asking_rent_change_fl
+#
+gghist <- function(data, var, title, color, fillcolor) {
+ggplot(data, aes(x=percent_avg_asking_rent_change_fl)) + 
+  geom_histogram(breaks=seq(-.10, .1, by =.01), color = color, fill = fillcolor) +
+  stat_bin(breaks=seq(-.10, .1, by =.01), geom="text", aes(label=..count..) , vjust = -1) + 
+  scale_x_continuous(labels=scales::percent_format(accuracy = 1)) +
+  ggtitle(title) + 
+  xlab("% Rent Change") + 
+  ylab("# of Units") +
+  ggthemes::theme_economist() +
+  ggthemes::scale_colour_economist() +
+  theme(axis.title = element_text(size = rel(2)), axis.text = element_text(size = 12), plot.title = element_text(size=18))
+}
+
+
+plot_data <- df_rents_fl_by_unit
+
+df_gif <- df_rents_fl_by_unit
+
+#fwrite(plot_data, "C:/Users/kplank/Essex Property Trust, Inc/Costar Data - Documents/code/gganimate/plot_data_051320.csv")
+
+#sum(plot_data$number_of_units)
+
+# 
+# names(pb_data)
+# 
+# hist_check <- subset(pb_data, pb_data$date == "2020-02-28")
+# hist_check %<>% select(avg_asking_unit, property_id)
+# 
+# hist_check <- merge(pb_data, hist_check, by = "property_id")
+# 
+# hist_check$diff <- hist_check$avg_asking_unit.x - hist_check$avg_asking_unit.y
+# 
+# check1 <- subset(hist_check, hist_check$diff == 0 & hist_check$date == "2020-04-24")
+# 
+# check2 <- subset(hist_check, hist_check$diff == 0 & hist_check$date == "2020-04-27")
+
+fwrite(plot_data, "C:/Users/kplank/Essex Property Trust, Inc/DART - Documents/PULSE/rent_data/power_bi_rent_data.csv")
+
+fwrite(plot_data, paste0("C:/Users/kplank/Essex Property Trust, Inc/Costar Data - Documents/power_bi_rent_data/power_bi_rent_data", curr, ".csv"))
+
+#gghist(df_rents_fl_by_unit, percent_avg_asking_rent_change_fl, "2/28 to Present % Average Asking Rent Change", "darkblue", "white")
+plot_data <- subset(plot_data, abs(plot_data$percent_avg_asking_rent_change_fl)>0)
+plot_data <- subset(plot_data, plot_data$date == time_x)
+#sum(plot_data$number_of_units)
+plot_data %<>% select(percent_avg_asking_rent_change_fl, number_of_units)
+plot_data <- data.frame(plot_data[rep(seq_len(dim(plot_data)[1]), plot_data$number_of_units), , drop = FALSE], row.names=NULL)
+
+
+ggplot(plot_data, aes(x=percent_avg_asking_rent_change_fl)) + 
+  geom_histogram(breaks=seq(-.15, .15, by =.01), color = "darkblue", fill = "white") +
+  stat_bin(breaks=seq(-.15, .15, by =.01), geom="text", aes(label=..count..) , vjust = -1) + 
+  scale_x_continuous(labels=scales::percent_format(accuracy = 1), breaks=seq(-.14,.14, .02)) +
+  ggtitle("2/28 to Present % Average Asking Rent Change") + 
+  xlab("% Rent Change") + 
+  ylab("# of Units") +
+  ggthemes::theme_economist() +
+  ggthemes::scale_colour_economist() +
+  theme(axis.title = element_text(size = rel(2)), axis.text = element_text(size = 12), plot.title = element_text(size=18))
+
+
+rm(plot_data)
+
+```
+
+```{r market_gif, echo=FALSE, warning = FALSE}
+# 
+df_gif$avg_asking_pct <- (df_gif$avg_asking_unit - df_gif$avg_asking_unit_init)/df_gif$avg_asking_unit_init
+# 
+# 
+df_gif %<>% select(date, essex_markets, avg_asking_pct, number_of_units)
+# 
+df_gif <- subset(df_gif, abs(df_gif$avg_asking_pct)>0)
+# 
+# #plot_data <- subset(plot_data, plot_data$date == time_x)
+# #sum(plot_data$number_of_units)
+# 
+# 
+df_gif$date <- ymd(df_gif$date)
+# 
+df_gif$weekday<- weekdays(df_gif$date)
+# 
+df_gif <- subset(df_gif, df_gif$weekday == weekdays(ymd(time_x)))
+# 
+df_gif <- data.frame(df_gif[rep(seq_len(dim(df_gif)[1]), df_gif$number_of_units), , drop = FALSE], row.names=NULL)
+# 
+# 
+# 
+# # chart set up
+# 
+# # colors
+#cols <- c("#71445E", "#9B292E", "#235889")
+# 
+# 
+# 
+ market_gif <- ggplot(df_gif, aes(x=avg_asking_pct, alpha = ..count..)) + 
+    geom_histogram(breaks=seq(-.15, .15, by =.01), aes(fill = essex_markets)) +
+    stat_bin(breaks=seq(-.15, .15, by =.01)) + 
+    scale_x_continuous(labels=scales::percent_format(accuracy = 1), breaks=seq(-.15,.15, .05)) +
+    ggtitle("% Average Asking Rent Change, since 2/28", subtitle = "{closest_state}") + 
+    xlab("% Rent Change") + 
+    ylab("# of Units") +
+    ggthemes::theme_economist() +
+    ggthemes::scale_colour_economist()+
+    theme(axis.title = element_text(size = rel(2)), axis.text = element_text(size = 10), 
+          plot.title = element_text(size=18),  plot.subtitle = element_text(size = 18), legend.position = "none") + 
+    facet_wrap(. ~ essex_markets) +
+    transition_states(date, wrap = FALSE)
+# # 
+# 
+animate(market_gif, fps = 15, duration = 14, end_pause = 60, rewind = FALSE)
+
+
+
+```
+
+*Only properties with a non-zero % change have been included in the above visualization
+
+```{r plots_markets_2, echo=FALSE, warning = FALSE, include = FALSE}
+#clear out uneccessary items in the workspace
+rm(total_properties, changes_fl, changes, non_zero, non_zero_fl, df_point, df_sub, df_sub2)
+
+# Deprecated
+#----
+#write.csv(non_zero, "non_zero_data.csv")
+#non_zero <- non_zero[!duplicated(non_zero$property_id), ]
+# non_zero_change <- nrow(non_zero)/total_properties
+# print(non_zero_change)
+#----
+
+
+
+
+
+# select intersection properties
+
+
+
+sf_rents <- df_stored[!is.na(df_stored$latitude),]
+sf_rents %<>% filter(date %in% time_x)
+sf_rents = st_as_sf(sf_rents, coords = c("longitude", "latitude"), 
+                 crs = 4326, agr = "constant")
+
+#sf_rents %<>% filter(property_id %in% ids) temporarily removed
+
+sf_rents$property_id %<>% as.character()
+
+sf_ess <- subset(sf_rents, grepl("Essex", sf_rents$owner_name)) 
+
+sf_other<- subset(sf_rents, !grepl("Essex", sf_rents$owner_name)) 
+
+sf_buffer_ess = st_buffer(sf_ess, .0375)
+
+#mapview(sf_buffer_ess)
+sf_int <- as_tibble(st_intersection(sf_other, sf_buffer_ess))
+
+# remove duplicate intersectors
+sf_int <- sf_int[!duplicated(sf_int$unique_id),]
+
+sf_int %<>% select(names(sf_ess), property_id_ess = property_id.1)
+
+sf_ess$property_id_ess <- sf_ess$property_id
+
+
+```
+
+
+ 
+
+
+```{r coronasf, echo=FALSE, warning = FALSE, fig.width=9.5, fig.height=6, include=FALSE}
+
+#  _,  _, __,  _, _, _  _,
+# / ` / \ |_) / \ |\ | / \
+# \ , \ / | \ \ / | \| |~|
+#   ~   ~  ~ ~  ~  ~  ~ ~ ~
+#
+# CORONA VIRUS
+# location <- c("Life Care Center of Kirkland")
+# lat <- 47.7072133
+# lon <- -122.2080712
+# 
+# corona <- data.frame(location, lat, lon)
+# 
+# corona = st_as_sf(corona, coords = c("lon", "lat"), 
+#                   crs = 4326, agr = "constant")
+# #corona %<>% set_units(mi)
+# 
+# #mapview(corona)
+# Radius = st_buffer(corona, .0435)
+# 
+# buff <- mapview(Radius, alpha = 0)
+
+
+#`Affected Properties` <- (st_intersection(sf_rents, Radius))
+
+`Affected Properties` <- sf_rents
+
+
+#change variables for Cleaned up mapview
+`Affected Properties`$`% Change in Asking Rent since 2/28` <- (`Affected Properties`$avg_asking_unit - `Affected Properties`$avg_asking_unit_init)/`Affected Properties`$avg_asking_unit_init
+
+
+`Affected Properties` %<>% filter(date %in% time_x) 
+
+# # Tweak Data for Histogram
+# corona_int <- as_tibble(st_intersection(sf_rents, Radius))
+`Affected Properties Breakout` <- data.frame(`Affected Properties`[rep(seq_len(dim(`Affected Properties`)[1]), `Affected Properties`$number_of_units), , drop = FALSE], row.names=NULL)
+
+
+`Ess. Markets` <- `Affected Properties`
+
+```
+
+## Property-level Asking Rent Changes
+Pan or Zoom to Adjust Map View
+*Note map now includes property in bottom 25% of initial rents, point size now based on units
+
+```{r coronamap, echo=FALSE, warning = FALSE, fig.width=9.5, fig.height=6}
+
+
+check <- `Ess. Markets` %>% select(`% Change in Asking Rent since 2/28`, property_name, geometry, market_name, Owner=owner_name)
+
+blist <- c("South Bay/San Jose", "San Francisco",	"East Bay/Oakland")
+
+bay <- check %>% filter(market_name %in% blist)
+
+bay_neg <- subset(bay, bay$`% Change in Asking Rent since 2/28` > 0)
+
+bay_neg <- subset(bay, bay$`% Change in Asking Rent since 2/28` < 0)
+
+`Ess. Markets` %<>% select(`% Change in Asking Rent since 2/28`, property_name, owner_name, number_of_units, geometry)
+
+
+
+
+# # 
+# 
+# 
+
+# levels(`Ess. Markets`$rcq)
+`Ess. Markets`$change_factor <- ifelse(`Ess. Markets`$`% Change in Asking Rent since 2/28` < -.05, "<-5%", ifelse(`Ess. Markets`$`% Change in Asking Rent since 2/28` >= -.05 & `Ess. Markets`$`% Change in Asking Rent since 2/28` < -.02, "-5% to -2%", ifelse(`Ess. Markets`$`% Change in Asking Rent since 2/28` >= -.02 & `Ess. Markets`$`% Change in Asking Rent since 2/28` < 0, "-2% to 0%", ifelse(`Ess. Markets`$`% Change in Asking Rent since 2/28`==0, "No Change", ifelse(`Ess. Markets`$`% Change in Asking Rent since 2/28` > 0 & `Ess. Markets`$`% Change in Asking Rent since 2/28` <= .02, "0% to 2%", ">2%")))))
+
+`Ess. Markets` = `Ess. Markets`[!is.na(`Ess. Markets`$change_factor),]
+
+
+`Ess. Markets`$change_factor <- as.factor(`Ess. Markets`$change_factor)
+# 
+#  
+`Ess. Markets`$change_factor <- factor(`Ess. Markets`$change_factor, levels = c("<-5%","-5% to -2%", "-2% to 0%", "No Change", "0% to 2%",">2%"))
+
+`Ess. Markets`$`% Change in Asking Rent since 2/28 Level` <- `Ess. Markets`$change_factor
+
+`Ess. Markets` %<>% select(Property = property_name,`% Change in Asking Rent since 2/28 Level`, `% Change in Asking Rent since 2/28`, Owner=owner_name, Units = number_of_units, geometry)
+
+`Ess. Markets`$`% Change in Asking Rent since 2/28` <- scales::percent(`Ess. Markets`$`% Change in Asking Rent since 2/28`)
+
+
+
+
+#  "#239B56"
+pts <- mapview(`Ess. Markets`, zcol = "% Change in Asking Rent since 2/28 Level", cex = "Units",
+               label=`Ess. Markets`$Property, col.regions=c("#4d0000", "#EC7063", "#ffcccc","#AEB6BF", "#82E0AA", "#239B56"), 
+               popup = popupTable(`Ess. Markets`,
+                                      zcol = c("Property",
+                                               "Owner",
+                                               "% Change in Asking Rent since 2/28", 
+                                               "Units")), alpha = 0, legend=TRUE, layer.name="Chg. in Asking Rent since 2/28")
+ 
+
+
+pts@map %>% setView(-118.31879, 33.91048, zoom = 9) #%>% addResetMapButton
+
+#pts
+
+
+
+```
+
+```{r coronaplot, echo=FALSE, warning = FALSE, fig.width=15, fig.height=10}
+
+
+
+
+# gghist(`Affected Properties`, `% Change in Asking Rent since 2/28`, "WA Coronavirus Effects: Average Asking Rent (Building)", "darkred", "white")
+# 
+# gghist(`Affected Properties Breakout`, `% Change in Asking Rent since 2/28`, "WA Coronavirus Effects: Average Asking Rent (Unit)", "darkred", "white")
+
+#hist(corona_int$percent_avg_asking_rent_change_fl)
+
+
+
+#corona_int <- corona_int %>% 
+ # select(Date=date, `Property` =property_name, Units = number_of_units, `Avg. Asking Rent #Change`=percent_avg_asking_rent_change_fl,`Avg. Asking Rent` = avg_asking_unit, `One Bed Asking Rent`= one_bedroom_asking_rent_unit ) %>%
+ # data.table::as.data.table(lengthMenu = c(5, 10, 15, 20))
+```
+
+
+
+```{r corona_table, echo=FALSE, warning = FALSE, fig.width=15, fig.height=6}           
+# DT::datatable(corona_int) %>% 
+#    formatPercentage(c("Avg. Asking Rent Change"), 1) %>%
+#    formatCurrency(c("Avg. Asking Rent", "One Bed Asking Rent"),"$", digits =0)
+
+#
+#rm(corona_int, corona_int_breakout)
+
+
+
+```
+
+## Individual Market Breakouts 
+
+```{r market_fix_more_histograms, echo= FALSE, warning = FALSE}
+
+
+# reattach essex properties
+sf_int <- as.data.frame(sf_int)
+sf_ess <- as.data.frame(sf_ess)
+df_rents <- rbind(sf_ess, sf_int)
+
+
+
+
+# Now create a grouped time series for the data
+
+# attach the selected Essex properties for each cluster of properties
+# select appropriate vars from df_ess
+df_ess %<>% select(-file_name, -sales_company, -property_manager_contact, -owner_contact,
+                   -property_manager_address, -property_manager_city_state_zip, -property_manager_phone,
+                   -state)
+
+names(df_ess) <- paste0(names(df_ess), "_ess")
+
+df_ess <- df_ess[!duplicated(df_ess$property_id_ess),]
+
+df_rents <- merge(df_rents, df_ess, by= "property_id_ess")
+#names(df_rents)
+
+#df_rents$property_id_ess
+
+df_rents_sub <- subset(df_rents, df_rents$property_id_ess == "1523700")
+
+# apply lags to rent
+df_rents$percent_avg_asking_rent_change <- df_rents$avg_asking_unit_diff/df_rents$avg_asking_unit_lag
+
+df_rents$percent_avg_asking_rent_change_fl <- df_rents$avg_asking_unit_diff_fl/df_rents$avg_asking_unit_fl
+
+#
+#df_rents <- df_rents[!is.na(df_rents$year_built),]
+# create new market names
+
+market_name <- levels(as.factor(df_rents$market_name))
+essmarx <- c("Oakland", "Orange", "Los Angeles", "San Francisco",
+             "Orange", "San Diego", "San Francisco",
+                   "Ventura", "San Jose", "Seattle", "San Jose")
+marx <- data.frame(market_name, essmarx)
+
+df_rents <- merge(df_rents, marx, by = "market_name")
+
+df_rents$essex_markets <- as.character(df_rents$essmarx)
+
+df_rents$essex_markets <- ifelse(df_rents$county_name == "Ventura", "Ventura", df_rents$essex_markets)
+
+df_rents$essex_markets <- as.factor(df_rents$essex_markets)
+
+
+
+rm(marx)
+
+# Average year built
+#mean(df_rents$year_built)
+#mean(df_rents$year_built_ess)
+
+
+# different function
+gghist_facet <- function(data, var, title, color, fillcolor) {
+ggplot(data, aes(x=avg_asking_unit_pct)) + 
+  geom_histogram(breaks=seq(-.15, .15, by =.01), color = color, fill = fillcolor) +
+  stat_bin(breaks=seq(-.15, .15, by =.01), geom="text", aes(label=..count..) , vjust = -1.5, size = 4) + 
+  scale_x_continuous(breaks=seq(-.15,.15, .05),labels=scales::percent_format(accuracy = 1)) +
+  ggtitle(title) + 
+  xlab("% Rent Change") + 
+  ylab("# of Buildings") +
+  ggthemes::theme_economist() +
+  ggthemes::scale_colour_economist()+
+  theme(axis.title = element_text(size = rel(2)), axis.text = element_text(size = 14), 
+        plot.title = element_text(size=18), panel.spacing.x = unit(5, "mm")) +
+  facet_wrap(. ~ essex_markets)
+  
+}
+  
+
+
+# Visualizations with Costar Data Comps
+# This data is not limited by the comps, it is all properties within 3 miles of Essex properties
+
+df_market_hist <- subset(df_stored, df_stored$date == time_x) 
+
+
+market_name <- levels(as.factor(df_rents$market_name))
+essmarx <- c("Oakland", "Orange", "Los Angeles", "San Francisco",
+             "Orange", "San Diego", "San Francisco",
+                   "Ventura", "San Jose", "Seattle", "San Jose")
+marx <- data.frame(market_name, essmarx)
+
+df_market_hist <- merge(df_market_hist, marx, by = "market_name")
+
+df_market_hist$essex_markets <- as.character(df_market_hist$essmarx)
+
+df_market_hist$essex_markets <- ifelse(df_market_hist$county_name == "Ventura", "Ventura", df_market_hist$essex_markets)
+
+df_market_hist$essex_markets <- as.factor(df_market_hist$essex_markets)
+
+
+
+df_market_hist_expand <- df_market_hist %>% select(essex_markets, property_name, property_id, owner_name, number_of_units, avg_asking_unit, avg_asking_unit_init) %>%
+                                             mutate(avg_asking_unit_pct = (avg_asking_unit- avg_asking_unit_init)/avg_asking_unit_init)
+
+
+#fwrite(df_market_hist_expand, "C:/Users/kplank/Essex Property Trust, Inc/Costar Data - Documents/increase_checks.csv")
+
+gghist_facet(df_market_hist_expand, avg_asking_unit_pct, "2/28/2020 to Present Market Breakdown", "darkblue", "white")
+
+# gghist_facet(df_rents, percent_one_bed_avg_asking_rent_change, "2/28/2020 to Present Market Breakdown One Bed", "darkblue", "white")
+
+
+# exclude those that arent similar in terms of year_built
+
+# mean(abs(df_rents$year_built - df_rents$year_built_ess))
+
+df_rents_year_subset <- subset(df_rents, abs(df_rents$year_built - df_rents$year_built_ess) < 25)
+
+# gghist_facet(df_rents_year_subset, percent_avg_asking_rent_change_fl, "2/28/2020 to Present Market Breakdown <25 Year Difference", "darkblue", "white")
+# 
+# gghist_facet(df_rents_year_subset, percent_one_bed_avg_asking_rent_change, "2/28/2020 to Present Market Breakdown One Bed  <25 Year Difference", "darkblue", "white")
+
+
+
+```
+
+
+
+```{r high_low, echo=FALSE, warning=FALSE}
+
+df_rents$avg_asking_rent_change_fl_category <- ifelse(df_rents$percent_avg_asking_rent_change_fl > 0, ">0", "<0")
+
+df_rents$avg_asking_one_bed_rent_change_fl_category <- ifelse(df_rents$percent_one_bed_avg_asking_rent_change > 0, ">0", "<0")
+
+# ggplot(df_rents, aes(essex_markets)) + geom_bar(aes(fill=avg_asking_rent_change_fl_category), position = "fill") + 
+#   scale_fill_manual("legend", values = c(">0" = "lightblue", "<0" = "darkred")) +
+#   ggtitle("Positive vs. Negative Avg. Rent Change") + 
+#   xlab("") + 
+#   ylab("Pos (+) vs. Neg (-)") +
+#   ggthemes::theme_economist() +
+#   ggthemes::scale_colour_economist()
+# 
+# 
+# ggplot(df_rents, aes(essex_markets)) + geom_bar(aes(fill=avg_asking_one_bed_rent_change_fl_category), position = "fill") + 
+#   scale_fill_manual("legend", values = c(">0" = "lightblue", "<0" = "darkred")) +
+#   ggtitle("Positive vs. Negative Avg. Rent Change (One Bed)") + 
+#   xlab("") + 
+#   ylab("Pos (+) vs. Neg (-)") +
+#   ggthemes::theme_economist() +
+#   ggthemes::scale_colour_economist()
+
+
+
+```
+
+
+
+
+```{r stargazer, echo=FALSE, warning=FALSE, results = 'asis'}
+
+# NOTE: add results = 'asis' if you want to use type = 'html'
+
+df_rents_star <- df_rents %>% select(essex_markets, `One Bed Avg. Asking Rent % Change`=percent_one_bed_avg_asking_rent_change, `One Bed Avg. Asking Rent % Change 2/28-Present` = percent_avg_asking_rent_change_fl) 
+
+# summary(df_rents_star)
+
+
+marx <- levels(as.factor(df_rents_star$essex_markets))
+
+# for (x in marx) {
+# 
+# data  <- subset(df_rents_star, df_rents_star$essex_markets == x)
+#   
+# stargazer(data, type='html', title = x, column.sep.width = "35pt")
+# 
+# }
+
+```
+
+<br/>
+
+```{r mapping, echo=FALSE, warning=FALSE, include = FALSE}
+
+#remap
+#sf_rents = st_as_sf(df_rents, coords = c("longitude", "latitude"), 
+  #                  crs = 4326, agr = "constant")
+
+#mapview(sf_rents)
+
+```
+
+
+
+```{r comp_mapping, echo=FALSE, warning=FALSE, include=FALSE}
+
+pre_matched <- read.csv("C:/Users/kplank/Essex Property Trust, Inc/Costar Data - Documents/submarket_mapping/essex_mapper.csv")
+
+
+
+# Merge with Comps
+# 
+# Clean zip and name
+
+df_rents <- df_stored 
+
+df_rents <- subset(df_rents, df_rents$owner_name != "Essex Property Trust, Inc.")
+
+df_rents %<>% filter(date %in% time_x)
+
+df_rents$zip_short <- substr(df_rents$zip, 1,5)
+df_rents$name_zip <- paste(df_rents$property_name," ", df_rents$zip_short)
+df_rents$name_zip <- tolower(df_rents$name_zip)
+
+df_rents$name_zip <- multigsub(c("apartments", "apartment", "the ", "at", "@", "luxury", "  ", "essex- ", " and ", "&", " i ", " ii "),
+                               c("", "", "", " ", "", "", " ", "", "", "", "", ""), df_rents$name_zip)
+
+df_rents$name_zip <- gsub(" ", "", df_rents$name_zip)
+
+
+# There seems to be an issue with a naming convention putting owner name in front of the property name ie "Essex- The Grand"
+# we want just "grand"
+
+
+df_rents$name_zip  <- gsub(".*-"," ", df_rents$name_zip)
+
+df_rents$name_zip <- trimws(df_rents$name_zip, "l") # remove leading space
+
+# merge wtih comp list
+# comps <- read_excel("E:/Projects_network/HeadRoomAnalysis/comps/comp_list.xlsx") # old
+props_comps <- read.csv("E:/Projects_network/HeadRoomAnalysis/comps_list_edit.csv") # read in comp matches
+comps <- props_comps # assign to different name to store data
+comps <- subset(comps, comps$Quantity > 149  | comps$`True.Owner` == "Essex Property Trust Inc") # no properties will have less than 149 units/other than maybe an essex property
+
+
+comps <- comps[!duplicated(comps$comp_id), ]
+comps %<>% select(Name, comp_id, Zip)
+
+
+
+# Clean zip and Name
+comps$name_zip <- paste(comps$Name, " ", comps$`Zip`)
+comps$name_zip <- tolower(comps$name_zip)
+
+comps$name_zip <- multigsub(c("apartments", "apartment", "the ", " at ", "@", "luxury", "  ", "essex- ", " and ", "&", " i ", " ii "),
+                               c("", "", "", " ", "", "", " ", "", "", "", "", ""), comps$name_zip)
+
+comps$name_zip <- gsub(" ", "", comps$name_zip)
+
+
+comps$name_zip  <- gsub(".*-","", comps$name_zip)
+comps$name_zip  <- gsub("-","", comps$name_zip)
+
+comps$name_zip <- trimws(comps$name_zip, "l") # remove leading spac
+
+# Merge data sets
+data <- merge(df_rents, comps, by = "name_zip")
+#data <- merge(df_rents, comps, by = "name_zip", all.y = TRUE)
+
+
+
+
+
+id_matches <- data %>% select(axio_comp_id = comp_id, costar_id = property_id, property_name)
+id_matches <- id_matches[!is.na(id_matches$costar_id),]
+
+
+ids <- id_matches$costar_id
+
+`%out%` = Negate(`%in%`)
+
+df_rents %<>% filter(property_id %out% ids)
+
+# fail <- fail[!is.na(fail$comp_address), ]
+ #axio_ids <- axio_ids[!is.na(axio_ids$comp_address), ]
+# 
+# # Great this works, however we want to go by order of most successful distances.
+# # We can do this by performing a max_dist of 1, removing those that were successful and so on
+# 
+# # run 1st time
+# 
+ for (i in 1:2){
+        failure_correction_1 <- df_rents %>%
+                stringdist_inner_join(comps, by = c(name_zip = "name_zip"), max_dist = i)
+        
+        id_matches_fix <- failure_correction_1 %>% select(axio_comp_id = comp_id, costar_id = property_id, property_name)
+        id_matches <- rbind(id_matches, id_matches_fix)
+        ids_fix <- id_matches$costar_id
+        ids <- c(ids, ids_fix)
+        df_rents %<>% filter(property_id %out% ids_fix)
+        
+ }
+
+props_comps <- merge(props_comps, id_matches, by.x = "comp_id", by.y = "axio_comp_id")
+
+id_matches_prop <- id_matches
+id_matches_prop %<>% select(axio_prop_id=axio_comp_id, costar_id_prop=costar_id)
+
+props_comps <- merge(props_comps, id_matches_prop, by.x = "prop_id", by.y = "axio_prop_id")
+
+props_comps %<>% select(costar_id_prop, costar_id, Name, market=MarketName_prop)
+
+props_comps <- subset(props_comps, props_comps$costar_id_prop != props_comps$costar_id)
+# 
+# 
+# 
+# print(nrow(id_matches))
+
+#(id_matches, "C:/Users/kplank/Desktop/Projects/sister_communities/id_matches.csv")
+#fwrite(id_matches, "C:/Users/kplank/Desktop/Projects/sister_communities/id_matches_v2.csv")
+
+```
+
+```{r comp_mapping_additional_comps, echo=FALSE, warning=FALSE, include=FALSE}
+
+# the goal is to add more ids and matches to "props_comps"
+#keeper <- props_comps
+#props_comps <- keeper
+#first summarise and remove ids that have more than 6 comps
+number_comps <- props_comps
+number_comps$costar_id_prop <- as.factor(number_comps$costar_id_prop)
+number_comps <- props_comps %>% group_by(costar_id_prop) %>% 
+   tally()
+
+
+series <- c(.003625, .005, .00725, .01, .015)
+
+
+initial_rent <- subset(df_stored, df_stored$date == "2020-02-28")
+
+initial_rent %<>% select(property_id, avg_asking_unit)
+
+initial_rent_2 <- initial_rent %>% select(property_id, avg_asking_unit_comp=avg_asking_unit)
+
+
+for (i in series) {
+
+
+# remove the comps that have enough
+sufficient_comps <- subset(number_comps, number_comps$n < 4)
+insufficient <- sufficient_comps$costar_id_prop
+# current date
+all_props <- subset(df_stored, df_stored$date == time_x)
+# remove excess variables
+all_props %<>% select(property_id, owner_name, property_name, longitude, latitude)
+# just essex props
+ess_props <- subset(all_props, all_props$owner_name == "Essex Property Trust, Inc." |  all_props$owner_name == "Essex Property Trust, Inc HQ")
+ess_props %<>% filter(property_id %in% insufficient) 
+
+all_props <- subset(all_props, all_props$owner_name != "Essex Property Trust, Inc." &  all_props$owner_name != "Essex Property Trust, Inc HQ")
+
+
+
+# Make into SF objects
+
+all_props = st_as_sf(all_props, coords = c("longitude", "latitude"), 
+                 crs = 4326, agr = "constant")
+
+ess_props = st_as_sf(ess_props, coords = c("longitude", "latitude"), 
+                 crs = 4326, agr = "constant")
+
+buffer_ess = st_buffer(ess_props, i)
+
+#mapview(sf_buffer_ess)
+comp_int <- as_tibble(st_intersection(all_props, buffer_ess))
+
+comp_int$prev_selected <- paste0(comp_int$property_id.1, comp_int$property_id)
+
+comp_int %<>% select(costar_id = property_id, costar_id_prop=property_id.1, Name=property_name.1, prev_selected)
+
+old_match <- paste0(props_comps$costar_id_prop, props_comps$costar_id)
+
+
+comp_int %<>% filter(prev_selected %out% old_match) %>% 
+   select(costar_id_prop, costar_id, Name)
+
+
+comp_int <- merge(comp_int, initial_rent, by.x = "costar_id_prop", by.y = "property_id")
+comp_int <- merge(comp_int, initial_rent_2, by.x = "costar_id", by.y = "property_id")
+
+comp_int %<>% mutate(rent_diff_pct = (avg_asking_unit-avg_asking_unit_comp/avg_asking_unit))
+comp_int <- subset(comp_int, comp_int$rent_diff_pct > -.075 & comp_int$rent_diff_pct < .075)
+sufficient_comps <- plyr::rbind.fill(props_comps, comp_int)
+props_comps <- sufficient_comps
+number_comps <- props_comps %>% group_by(costar_id_prop) %>% 
+   tally()
+
+
+}
+
+props_comps <- subset(props_comps, props_comps$costar_id_prop != props_comps$costar_id)
+props_comps %<>% select(-market)
+props_comps <- merge(props_comps, market_id_storage, by.x = "costar_id_prop", by.y = "property_id")
+props_comps %<>% select(costar_id_prop, costar_id, Name, market=essex_markets)
+
+
+
+props_comps <- read.csv("C:/Users/kplank/Essex Property Trust, Inc/Costar Data - Documents/submarket_mapping/completed_comps_v2.csv")
+props_comps <- subset(props_comps, props_comps$costar_id_comp != 4113693)
+props_comps <- merge(props_comps, market_id_storage_name, by.x = "costar_id_prop", by.y = "property_id")
+props_comps %<>% select(costar_id_prop, costar_id=costar_id_comp, Name=property_name, market=essex_markets, team)
+
+props_comps$uniq <- paste0(props_comps$costar_id_prop, props_comps$costar_id)
+props_comps <- props_comps[!duplicated(props_comps$uniq), ]
+checker <- props_comps %>% group_by(costar_id_prop) %>% tally()
+
+```
+
+
+
+
+```{r comp_mapping_plot_merge_select, echo=FALSE, warning=FALSE}
+
+
+# comp_expanded <- read.csv("E:/Projects_network/HeadRoomAnalysis/comps_list_edit.csv")
+# 
+# comp_expanded %<>% select(prop_id, comp_id)
+# 
+# comps <- merge(comp_expanded, id_matches, by.x = "comp_id", by.y = "axio_id")
+# 
+# comps <- merge(comps, id_matches, by.x = "prop_id", by.y = "axio_id")
+# 
+# comps %<>% select(prop_id, comp_id, costar_id_prop=costar_id.x, costar_id_comp = costar_id.y, property_name=property_name.x, comp_name = property_name.y)
+```
+
+```{r comp_mapping_plot_merge_select_1, echo=FALSE, warning=FALSE}
+
+
+# comp_expanded <- read.csv("E:/Projects_network/HeadRoomAnalysis/comps_list_edit.csv")
+# 
+# comp_expanded %<>% select(prop_id, comp_id)
+# 
+# comps <- merge(comp_expanded, id_matches, by.x = "comp_id", by.y = "axio_id")
+# 
+# comps <- merge(comps, id_matches, by.x = "prop_id", by.y = "axio_id")
+
+```
+
+```{r ess_vs_submarket, echo=FALSE, warning=FALSE, include=FALSE}
+
+submark <- submarket_storage
+
+submark <- subset(submark, submark$owner_name != "Essex Property Trust, Inc.")
+ess <- subset(unfiltered_storage, unfiltered_storage$owner_name == "Essex Property Trust, Inc." |  unfiltered_storage$owner_name == "Essex Property Trust, Inc HQ")
+
+#ess <- subset(ess, ess$property_name == "Park Catalina")
+
+ess$avg_asking_unit_diff_fl <- ess$avg_asking_unit - ess$avg_asking_unit_fl
+
+ess$percent_avg_asking_rent_change_fl <- ess$avg_asking_unit_diff_fl/ess$avg_asking_unit_fl
+
+ess %<>% group_by(date, ess_submarket) %>%
+   mutate(submarket_units = sum(number_of_units)) %>%
+   mutate(submark_avg_asking_unit_pct = (percent_avg_asking_rent_change_fl*number_of_units)/submarket_units,
+          sub_mark_avg_asking_unit= (avg_asking_unit*number_of_units)/submarket_units) %>% 
+   summarise(ess_submark_avg_asking_unit_pct = sum(submark_avg_asking_unit_pct, na.rm=TRUE),
+             ess_submark_avg_asking_unit = sum(sub_mark_avg_asking_unit, na.rm=TRUE),
+             submarket_units = last(submarket_units))
+
+
+submark %<>% group_by(date, ess_submarket) %>%
+   mutate(submarket_units = sum(number_of_units)) %>%
+   mutate(submark_avg_asking_unit_pct = (percent_avg_asking_rent_change_fl*number_of_units)/submarket_units,
+          sub_mark_avg_asking_unit= (avg_asking_unit*number_of_units)/submarket_units) %>% 
+   summarise(submark_avg_asking_unit_pct = sum(submark_avg_asking_unit_pct),
+             submark_avg_asking_unit = sum(sub_mark_avg_asking_unit))
+
+
+#create submarket & date id for merging
+
+submark$uniq <- paste0(submark$ess_submarket, submark$date)
+ess$uniq <- paste0(ess$ess_submarket, ess$date)
+
+
+#
+submark_ess <- merge(ess, submark, by = "uniq")
+
+submark_ess %<>% select(date=date.x, ess_submarket = ess_submarket.x,
+                        ess_submark_avg_asking_unit_pct, submark_avg_asking_unit_pct,
+                        ess_submark_avg_asking_unit, submark_avg_asking_unit, submarket_units)
+
+submark_ess_current_time <- subset(submark_ess, submark_ess$date == time_x)
+submark_ess_current_time %<>% select(ess_submarket, `ESS. Submarket % Change since 2/28`= ess_submark_avg_asking_unit_pct, `Submarket % Change since 2/28` =submark_avg_asking_unit_pct, `Submarket Avg. Asking Rent` = submark_avg_asking_unit, submarket_units)
+submark_ess_current_time$ess_submarket <- as.factor(submark_ess_current_time$ess_submarket)
+
+submark_ess_current_time_plot <- subset(submark_ess_current_time, submark_ess_current_time$ess_submarket != "Unidentified")
+
+```
+
+```{r  ess_vs_submarket_viz, echo=FALSE, warning=FALSE, include=FALSE}
+#reactable(submark_ess_current_time)
+#theme_set(theme_classic())
+dumbell <- ggplot(submark_ess_current_time_plot, aes(x=`ESS. Submarket % Change since 2/28`, xend=`Submarket % Change since 2/28`, y=ess_submarket, group=ess_submarket)) + 
+        geom_dumbbell(color="#e3e2e1", colour_x="#938DD2", colour_xend = "#90353B", 
+                      size=4) + 
+        scale_x_continuous(labels=scales::percent_format(accuracy = 1)) + 
+        labs(x=NULL, 
+             y=NULL, 
+             title="ESS vs. Submarket", 
+             subtitle="Pct Change since 2/28") +
+         scale_color_manual(name="", values=c("#938DD2", "#90353B") ) +
+         theme_economist()
+
+#print(dumbell)
+
+```
+
+```{r comp_mapping_plot_merge_select_2, echo=FALSE, warning=FALSE}
+
+
+#df_props <- merge(df_stored, id_matches, by.x ="property_id", by.y = "")
+
+
+#comp_expanded <- read.csv("E:/Projects_network/HeadRoomAnalysis/comps_list_edit.csv")
+
+
+#market_name <- levels(as.factor(comp_expanded$MarketName))
+# essex_markets <- c("Orange", "Los Angeles", "Oakland", "Ventura", "San Diego", "San Francisco", "San Jose", "Seattle")
+# # 
+# marx <- data.frame(market_name, essex_markets)
+# # 
+# comp_expanded <- merge(comp_expanded, marx, by.x = "MarketName", by.y = "market_name")
+# # 
+# comp_expanded$essex_markets <- as.character(comp_expanded$essex_markets)
+# # 
+# #comp_expanded$essex_markets <- ifelse(comp_expanded$county_name == "Ventura", "Ventura", comp_expanded$essex_markets)
+# # 
+# comp_expanded$essex_markets <- as.factor(comp_expanded$essex_markets)
+# # 
+
+
+# comp_expanded %<>% select(prop_id, comp_id, essex_markets)
+# 
+# comps <- merge(comp_expanded, id_matches, by.x = "comp_id", by.y = "axio_id")
+# 
+# comps <- merge(comps, id_matches, by.x = "prop_id", by.y = "axio_id")
+# 
+# comps %<>% select(prop_id, comp_id, costar_id_prop=costar_id.x, costar_id_comp = costar_id.y, property_name=property_name.x, comp_name = property_name.y, essex_markets = essex_markets)
+
+df_stored$percent_avg_asking_rent_change_fl <- df_stored$avg_asking_unit_diff_fl/df_stored$avg_asking_unit_fl
+
+
+#select(property_id, one_bedroom_asking_init=one_bedroom_asking_avg_unit,
+ #         two_bedroom_asking_avg_unit_init = two_bedroom_asking_avg_unit,
+  #        studio_asking_avg_unit_init = studio_asking_avg_unit)
+
+
+df_clean <- df_stored %>% 
+  select(property_id, Date=date, `Property` =property_name, Units = number_of_units, `Avg. Asking Rent Change`=percent_avg_asking_rent_change_fl,`Avg. Asking Rent` = avg_asking_unit, `One Bed Asking Rent`= one_bedroom_asking_rent_unit, one_bedroom_asking_rent_init, two_bedroom_asking_rent_unit, studio_asking_rent_unit,
+         two_bedroom_asking_avg_init, studio_asking_avg_init, owner_name, ess_submarket) %>% filter(Date %in% time_x) %>% 
+   mutate(one_bedroom_avg_asking_pct_change = (`One Bed Asking Rent`-one_bedroom_asking_rent_init)/one_bedroom_asking_rent_init,
+          two_bedroom_avg_asking_pct_change=(two_bedroom_asking_rent_unit-two_bedroom_asking_avg_init)/two_bedroom_asking_avg_init,
+          studio_avg_asking_pct_change = (studio_asking_rent_unit-studio_asking_avg_init)/studio_asking_avg_init)
+
+comp_rent <- df_clean
+prop_rent <- df_clean
+names(prop_rent) <- paste0(names(prop_rent), "_prop")
+names(comp_rent) <- paste0(names(comp_rent), "_comp")
+
+prop_rent$property_id_prop <- as.character(prop_rent$property_id_prop)
+comp_rent$property_id_comp <- as.character(comp_rent$property_id_comp)
+
+comps_1 <- merge(props_comps, prop_rent, by.x = "costar_id_prop", by.y = "property_id_prop")
+comps_2 <- merge(comps_1, comp_rent, by.x = "costar_id", by.y = "property_id_comp")
+
+#remove any  duplicate comps
+comps_2$uniq <- paste0(comps_2$costar_id, comps_2$costar_id_prop) 
+comps_2 <- comps_2[!duplicated(comps_2$uniq), ]
+
+#comps_x <- comps_2[comps_2$costar_id_prop!=comps_2$costar_id_comp,]
+
+comps_x <- subset(comps_2, comps_2$owner_name_prop == "Essex Property Trust, Inc." | comps_2$owner_name_prop == "Essex Property Trust, Inc HQ")
+
+
+
+# time series version
+df_clean <- df_stored %>% 
+  select(property_id, Date=date, `Property` =property_name, Units = number_of_units, `Avg. Asking Rent Change`=percent_avg_asking_rent_change_fl,avg_asking_unit, `One Bed Asking Rent`= one_bedroom_asking_rent_unit,one_bedroom_asking_rent_unit, one_bedroom_asking_rent_init, two_bedroom_asking_rent_unit, studio_asking_rent_unit,
+         two_bedroom_asking_avg_init, studio_asking_avg_init, owner_name, ess_submarket,
+         avg_effective_unit,
+         avg_asking_unit_init,
+         one_bedroom_effective_rent_unit,
+         two_bedroom_effective_rent_unit,
+         studio_effective_rent_unit,
+          one_bedroom_effective_rent_unit_init,
+         two_bedroom_effective_rent_unit_init,
+         studio_effective_rent_unit_init,
+         effective_pct) %>% 
+   mutate(avg_asking_pct_change=  (avg_asking_unit - avg_asking_unit_init)/avg_asking_unit_init,
+      one_bedroom_avg_asking_pct_change = (`One Bed Asking Rent`-one_bedroom_asking_rent_init)/one_bedroom_asking_rent_init,
+          two_bedroom_avg_asking_pct_change=(two_bedroom_asking_rent_unit-two_bedroom_asking_avg_init)/two_bedroom_asking_avg_init,
+          studio_avg_asking_pct_change = (studio_asking_rent_unit-studio_asking_avg_init)/studio_asking_avg_init,
+          one_bedroom_avg_effective_pct_change = (one_bedroom_effective_rent_unit - one_bedroom_effective_rent_unit_init)/one_bedroom_effective_rent_unit_init,
+          two_bedroom_avg_effective_pct_change=(two_bedroom_effective_rent_unit-two_bedroom_effective_rent_unit_init)/two_bedroom_effective_rent_unit_init,
+          studio_avg_effective_pct_change = (studio_effective_rent_unit-studio_effective_rent_unit_init)/studio_effective_rent_unit_init)
+
+comp_rent <- df_clean
+prop_rent <- df_clean
+names(prop_rent) <- paste0(names(prop_rent), "_prop")
+names(comp_rent) <- paste0(names(comp_rent), "_comp")
+
+prop_rent$property_id_prop_merge <- paste0(as.character(prop_rent$property_id_prop), "|", prop_rent$Date)
+comp_rent$property_id_comp_merge <- paste0(as.character(comp_rent$property_id_comp), "|", comp_rent$Date)
+
+
+
+comps_1 <- merge(props_comps, prop_rent, by.x = "costar_id_prop", by.y = "property_id_prop")
+
+comps_1$costar_id_date <- paste0(as.character(comps_1$costar_id), "|", comps_1$Date)
+
+comps_2 <- merge(comps_1, comp_rent, by.x = "costar_id_date", by.y = "property_id_comp_merge")
+
+#remove any  duplicate comps
+# paste in a | when concatenating IDs to prevent weird combos not working
+comps_2$Date_prop <- as.character(comps_2$Date_prop)
+comps_2$uniq <- paste0(comps_2$costar_id,"|",comps_2$costar_id_prop, "|", comps_2$Date_prop) 
+comps_2$Date_prop <- ymd(comps_2$Date_prop)
+comps_2 <- comps_2[!duplicated(comps_2$uniq), ]
+
+#comps_x <- comps_2[comps_2$costar_id_prop!=comps_2$costar_id_comp,]
+
+comps_ts <- subset(comps_2, comps_2$owner_name_prop == "Essex Property Trust, Inc." | comps_2$owner_name_prop == "Essex Property Trust, Inc HQ")
+
+
+
+
+
+
+data <- df_stored
+
+
+market_name <- levels(as.factor(df_stored$market_name))
+essex_markets <- c("Oakland", "Orange", "Los Angeles", "San Francisco", "Orange", "San Diego", "San Francisco",
+                    "Ventura", "San Jose", "Seattle", "San Jose")
+# 
+marx <- data.frame(market_name, essex_markets)
+# , "|", 
+data <- merge(data, marx, by = "market_name")
+# 
+data$essex_markets <- as.character(data$essex_markets)
+# 
+data$essex_markets <- ifelse(data$county_name == "Ventura", "Ventura", data$essex_markets)
+# 
+data$essex_markets <- as.factor(data$essex_markets)
+# 
+rm(marx)
+
+id_marks <- data %>% select(property_id, essex_markets)
+
+#make into character variables
+comps_x$costar_id_prop <- as.character(comps_x$costar_id_prop)
+comps_ts$costar_id_prop <- as.character(comps_ts$costar_id_prop)
+id_marks$property_id <- as.character(id_marks$property_id)
+
+comps_xy <- merge(comps_x, id_marks, by.x = "costar_id_prop", by.y = "property_id")
+
+ids <- comps_x %>% select(costar_id, costar_id_prop)
+
+data <- read.csv(paste0("C:/Users/kplank/Essex Property Trust, Inc/Costar Data - Documents/costar_df_" , curr, ".csv"))
+
+#data <- subset(data, data$property_name == "Avant")
+
+data %<>%
+    group_by(property_id) %>%
+    mutate(avg_asking_unit_fl = impute.mean(avg_asking_unit_fl)) %>%
+    ungroup()
+
+data_comps <- data
+
+names(data_comps) <- paste0(names(data_comps), "_comp")
+
+data_comps <- merge(ids, data_comps, by.x = "costar_id", by.y = "property_id_comp")
+
+
+data_comps$id_date <- paste0(data_comps$costar_id_prop, data_comps$date)
+
+data$id_date <- paste0(data$property_id, data$date)
+
+data <- merge(data_comps, data, by.x = "id_date", by.y = "id_date")
+
+data <- merge(data, mapper, by.x = "zip", by.y = "zip")
+
+
+#impute mean
+
+data %<>% mutate(pct_avg_asking_unit_comp_change = (avg_asking_unit_comp - avg_asking_unit_fl_comp)/avg_asking_unit_fl_comp,
+                 pct_avg_asking_unit_change = (avg_asking_unit - avg_asking_unit_fl)/avg_asking_unit_fl)
+
+
+
+
+
+# add RPM mapping
+rpm <- read.csv("C:/Users/kplank/Essex Property Trust, Inc/Costar Data - Documents/submarket_mapping/rpm_mapper.csv")
+
+rpm %<>% select(property_id, rpm)
+
+comps_x <- merge(comps_x, rpm, by.x = "costar_id_prop", by.y = "property_id")
+comps_ts <- merge(comps_ts, rpm, by.x = "costar_id_prop", by.y = "property_id")
+#comps_x_2 %<>% group_by(costar_id_prop) %>% tally()
+
+
+# mutate(one_bedroom_acg_asking_pct_change = (`One Bed Asking Rent`-one_bedroom_asking_rent_unit_init)/one_bedroom_asking_rent_unit_init,
+#           two_bedroom_avg_asking_pct_change=(two_bedroom_asking_rent_unit-two_bedroom_asking_avg_unit_init)/two_bedroom_asking_avg_unit_init,
+#           studio_asking_rent_studio_pct_change = (studio_asking_rent_studio-studio_asking_avg_unit_init)/studio_asking_avg_unit_init)
+
+table<- comps_x %>% select(costar_id_prop, Market=market, ess_submarket=ess_submarket_prop,rpm, 
+                           Date=Date_prop, costar_id, costar_id_prop, Property=Property_prop, Comp = Property_comp,
+                           one_bedroom_asking_unit_comp= `One Bed Asking Rent_comp`,
+                           two_bedroom_asking_rent_unit_prop,
+                           two_bedroom_asking_rent_unit_comp,
+                           studio_asking_rent_unit_prop,
+                           studio_asking_rent_unit_comp,
+                           one_bedroom_asking_unit_prop=`One Bed Asking Rent_prop`,
+                           one_bedroom_avg_asking_pct_change_prop, one_bedroom_avg_asking_pct_change_comp,
+                           two_bedroom_avg_asking_pct_change_prop, two_bedroom_avg_asking_pct_change_comp,
+                           studio_avg_asking_pct_change_prop, studio_avg_asking_pct_change_comp,
+                   `Avg. Asking Rent Prop` = `Avg. Asking Rent_prop`,
+                   `Avg. Asking Rent Change_prop`,
+                   `Avg. Asking Rent Change_comp`,
+                   rent_comp =`Avg. Asking Rent_comp`, team,
+                   `Units`= `Units_prop`, units_comp = Units_comp)%>%
+                    mutate(weighted_rent = units_comp*rent_comp,
+                           weighted_change = units_comp*`Avg. Asking Rent Change_comp`) %>%
+                    group_by(Property, ess_submarket, Market) %>%
+                    mutate(total_units = sum(units_comp)) %>%
+                    ungroup() %>%
+                    group_by(Market, ess_submarket, Property, Date) %>%
+                    mutate(`Avg. Asking Rent Property`=mean(`Avg. Asking Rent Prop`),
+                              `Property % Change` = mean(`Avg. Asking Rent Change_prop`),
+                              Units = mean(Units),
+                              weighted_rent = sum(`weighted_rent`),
+                              total_units = mean(total_units),
+                              `Avg. Asking Rent Change Comp`=sum(weighted_change),
+                              `# of Comps` = n()) %>%
+                    ungroup() %>%
+                    mutate(`Comp % Change` =`Avg. Asking Rent Change Comp`/total_units,
+                           `Avg. Asking Rent Comp (All)` = weighted_rent/total_units) %>%
+                    mutate(`Essex Premium` = (`Avg. Asking Rent Property`-rent_comp)/`Avg. Asking Rent Property`) %>%
+                    select(ID=costar_id_prop, Market, Submarket=ess_submarket, RPM =rpm, `Property Name` = Property, 
+                           Comp, Team= team,
+                           `Property Avg. Asking Rent` = `Avg. Asking Rent Property`,
+                           `Property % Chg since 2/28` = `Property % Change`,
+                           `Comps Avg. Asking Rent` = rent_comp,
+                           `Comps % Chg since 2/28` = `Avg. Asking Rent Change_comp`,
+                           `ESS Premium to Comps, %` = `Essex Premium`,
+                           `1 Bed % Chg since 2/28`=one_bedroom_avg_asking_pct_change_prop,
+                           `1 Bed % Chg since 2/28 (Comp)`=one_bedroom_avg_asking_pct_change_comp,
+                           `2 Bed % Chg since 2/28`=two_bedroom_avg_asking_pct_change_prop,
+                           `2 Bed % Chg since 2/28 (Comp)`=two_bedroom_avg_asking_pct_change_comp,
+                           `Studio % Chg since 2/28`=studio_avg_asking_pct_change_prop, 
+                           `Studio % Chg since 2/28 (Comp)`= studio_avg_asking_pct_change_comp, 
+                           `# of Comps`,  
+                           one_bedroom_asking_unit_prop,
+                           one_bedroom_asking_unit_comp,
+                           two_bedroom_asking_rent_unit_prop,
+                           two_bedroom_asking_rent_unit_comp,
+                           studio_asking_rent_unit_prop,
+                           studio_asking_rent_unit_comp)
+
+# 
+# one_bedroom_effective_rent_unit_init
+# two_bedroom_effective_rent_unit_init
+# studio_effective_rent_unit_init
+# effective_pct
+# one_bedroom_avg_effective_pct_change
+# two_bedroom_avg_effective_pct_chang
+# studio_avg_effective_pct_change
+
+
+
+table_ts<- comps_ts %>% select(costar_id_prop, Market=market, ess_submarket=ess_submarket_prop,rpm, 
+                           Date=Date_prop, costar_id, costar_id_prop, Property=Property_prop, Comp = Property_comp,
+                           one_bedroom_avg_asking_pct_change_prop, 
+                           one_bedroom_avg_asking_pct_change_comp,
+                           two_bedroom_avg_asking_pct_change_prop, 
+                           two_bedroom_avg_asking_pct_change_comp,
+                           studio_avg_asking_pct_change_prop,
+                           studio_avg_asking_pct_change_comp,
+                           one_bedroom_effective_rent_unit_init_prop,
+                           two_bedroom_effective_rent_unit_init_prop,
+                           studio_effective_rent_unit_init_prop, effective_pct_prop,
+                           one_bedroom_avg_effective_pct_change_prop, 
+                           two_bedroom_avg_effective_pct_change_prop,
+                           studio_avg_effective_pct_change_prop,
+                           one_bedroom_effective_rent_unit_init_comp, 
+                           two_bedroom_effective_rent_unit_init_comp,
+                           studio_effective_rent_unit_init_comp, effective_pct_comp,
+                           one_bedroom_avg_effective_pct_change_comp,
+                           two_bedroom_avg_effective_pct_change_comp,
+                           studio_avg_effective_pct_change_comp,
+                           avg_asking_pct_change_prop,
+                           avg_asking_pct_change_comp,
+                           `Avg. Asking Rent Prop` = avg_asking_unit_prop,
+                           `Avg. Asking Rent Change_prop`,
+                           `Avg. Asking Rent Change_comp`,
+                           rent_comp = avg_asking_unit_comp, team,
+                           `Units`= `Units_prop`, units_comp = Units_comp)%>%
+                    mutate(weighted_rent = units_comp*rent_comp,
+                           weighted_change = units_comp*`Avg. Asking Rent Change_comp`) %>%
+                    group_by(Date, Property, ess_submarket, Market) %>%
+                    mutate(total_units = sum(units_comp)) %>%
+                    ungroup() %>%
+                    group_by(Market, ess_submarket, Property, Date) %>%
+                    mutate(`Avg. Asking Rent Property`=mean(`Avg. Asking Rent Prop`),
+                              `Property % Change` = mean(`Avg. Asking Rent Change_prop`),
+                              Units = mean(Units),
+                              weighted_rent = sum(`weighted_rent`),
+                              total_units = mean(total_units),
+                              `Avg. Asking Rent Change Comp`=sum(weighted_change),
+                              `# of Comps` = n()) %>%
+                    ungroup() %>%
+                    mutate(`Comp % Change` =`Avg. Asking Rent Change Comp`/total_units,
+                           `Avg. Asking Rent Comp (All)` = weighted_rent/total_units) %>%
+                    mutate(`Essex Premium` = (`Avg. Asking Rent Property`-rent_comp)/`Avg. Asking Rent Property`) %>%
+                    select(Date, ID=costar_id_prop, Market, Submarket=ess_submarket, RPM =rpm, `Property Name` = Property, 
+                           Comp, Team= team,
+                           `Property Avg. Asking Rent` = `Avg. Asking Rent Property`,
+                           `Property % Chg since 2/28` = `Property % Change`,
+                           `Comps Avg. Asking Rent` = rent_comp,
+                           `Comps % Chg since 2/28` = `Avg. Asking Rent Change_comp`,
+                           `ESS Premium to Comps, %` = `Essex Premium`,
+                           `1 Bed % Chg since 2/28`=one_bedroom_avg_asking_pct_change_prop,
+                           `1 Bed % Chg since 2/28 (Comp)`=one_bedroom_avg_asking_pct_change_comp,
+                           `2 Bed % Chg since 2/28`=two_bedroom_avg_asking_pct_change_prop,
+                           `2 Bed % Chg since 2/28 (Comp)`=two_bedroom_avg_asking_pct_change_comp,
+                           `Studio % Chg since 2/28`=studio_avg_asking_pct_change_prop, 
+                           `Studio % Chg since 2/28 (Comp)`= studio_avg_asking_pct_change_comp, 
+                           one_bedroom_effective_rent_unit_init_prop,
+                           two_bedroom_effective_rent_unit_init_prop,
+                           studio_effective_rent_unit_init_prop, 
+                           effective_pct_prop,
+                           one_bedroom_avg_effective_pct_change_prop,
+                           two_bedroom_avg_effective_pct_change_prop,
+                           studio_avg_effective_pct_change_prop,
+                           one_bedroom_effective_rent_unit_init_prop,
+                           two_bedroom_effective_rent_unit_init_prop,
+                           studio_effective_rent_unit_init_prop, 
+                           effective_pct_prop,
+                           one_bedroom_avg_effective_pct_change_prop,
+                           two_bedroom_avg_effective_pct_change_prop,
+                           studio_avg_effective_pct_change_prop,
+                           `# of Comps`)
+
+
+# table_mark<- comps_x %>% select(Market=market, Date=Date_prop, costar_id, costar_id_prop, Property=Property_prop,
+#                    `Avg. Asking Rent Prop` = `Avg. Asking Rent_prop`,
+#                    `Avg. Asking Rent Change_prop`,
+#                    `Avg. Asking Rent Change_comp`,
+#                    rent_comp =`Avg. Asking Rent_comp`,
+#                    `Units`= `Units_prop`, units_comp = Units_comp)%>%
+#                     mutate(weighted_rent = units_comp*rent_comp,
+#                            weighted_change = units_comp*`Avg. Asking Rent Change_comp`) %>%
+#                     group_by(Market) %>%
+#                     mutate(total_units = sum(units_comp)) %>%
+#                     ungroup() %>%
+#                     group_by(Market, Date) %>%
+#                     summarise(`Avg. Asking Rent Property`=mean(`Avg. Asking Rent Prop`,na.rm=TRUE),
+#                               `Property % Change` = mean(`Avg. Asking Rent Change_prop`, na.rm=TRUE),
+#                               Units = mean(Units, na.rm=TRUE),
+#                               weighted_rent = sum(`weighted_rent`,na.rm=TRUE),
+#                               total_units = mean(total_units, na.rm=TRUE),
+#                               `Avg. Asking Rent Change Comp`=sum(weighted_change, na.rm=TRUE),
+#                               `# of Comps` = n()) %>%
+#                     ungroup() %>%
+#                     mutate(`Comp % Change` =`Avg. Asking Rent Change Comp`/total_units,
+#                            `Avg. Asking Rent Comp (All Weighted)` = weighted_rent/total_units) %>%
+#                     mutate(`Essex Premium` = (`Avg. Asking Rent Property`-`Avg. Asking Rent Comp`)/`Avg. Asking Rent Property`) %>%
+#                     select(Market,
+#                            `Property Avg. Asking Rent` = `Avg. Asking Rent Property`,
+#                            `Property % Chg since 2/28` = `Property % Change`,
+#                            `Comps Avg. Asking Rent (All Weighted)` = `Avg. Asking Rent Comp (All Weighted)`,
+#                            `Comps % Chg since 2/28` = `Comp % Change`,
+#                            `ESS Premium to Comps, %` = `Essex Premium`,
+#                            `# of Comps`)
+                    
+
+#  data.table::as.data.table()
+
+# head(comps)
+
+
+
+data1 <- merge(data, table,by.x="property_id", by.y = "ID")
+
+
+
+data1 %<>% select(date, Market, Submarket, property_name, property_name_comp, owner_name_comp,
+                 avg_asking_unit, avg_asking_unit_comp, 
+                 pct_avg_asking_unit_change, pct_avg_asking_unit_comp_change, number_of_units, number_of_units_comp,
+                 ess_comp_premium=`ESS Premium to Comps, %`, comp_count = `# of Comps`,
+                 latitude, 
+                 longitude, latitude_comp, longitude_comp)
+
+data1 %<>% group_by(date, property_name) %>%
+   mutate(comp_units = sum(number_of_units_comp, nar.rm=TRUE)) %>%
+   mutate(comp_wts = pct_avg_asking_unit_comp_change*(number_of_units_comp/comp_units)) %>%
+   mutate(avg_comp_change = sum(comp_wts)) %>%
+   ungroup()
+   
+#table %<>% group_by(ID) %>% tally()
+
+fwrite(data1, "C:/Users/kplank/Essex Property Trust, Inc/Costar Data - Documents/power_bi_rent_data/table_comps.csv")
+#data_select(date, )
+
+fwrite(data, "C:/Users/kplank/Essex Property Trust, Inc/Costar Data - Documents/power_bi_rent_data/power_bi_costar_comps_clean.csv", na = "")
+data1 <- subset(data1, data1$property_name == "Avant")
+
+avant_check <- subset(df_stored, df_stored$property_name == "Avant")
+
+
+```
+
+
+```{r comp_mapping_plot, echo=FALSE, warning=FALSE}
+
+
+
+# ggplot(data, aes(x=percent_avg_asking_rent_change_fl)) + 
+#   geom_histogram(bins=10, color = "darkblue", fill = "white") +
+#   stat_bin(binwidth= .01, geom="text", aes(label=..count..) , vjust = -1) + 
+#   scale_x_continuous(labels=scales::percent_format(accuracy = 1), breaks = seq(-.10,.10,.01)) + 
+#   ggtitle("2/28/2020 to Present Market Breakdown") + 
+#   xlab("% Rent Change") + 
+#   ylab("# of Buildings") +
+#   ggthemes::theme_economist() +
+#   ggthemes::scale_colour_economist() +
+#   theme(axis.title = element_text(size = rel(2)), axis.text = element_text(size = 16), plot.title = element_text(size=18)) +
+#   facet_wrap(. ~ essex_markets)
+
+```
+
+
+
+```{r reactor_table, echo=FALSE, warning=FALSE, include = FALSE}
+
+
+
+    
+DT::datatable(table) %>% 
+  formatPercentage(c("Property % Chg since 2/28", "Comps % Chg since 2/28", "ESS Premium to Comps, %"), 1) %>%
+    formatCurrency(c("Property Avg. Asking Rent", "Comps Avg. Asking Rent"),"$", digits =0)
+   
+
+
+dollar_format(prefix = "$", suffix = "", largest_with_cents = 1)
+
+```
+
+
+
+```{r data_table, echo=FALSE, warning=FALSE, fig.width=25, fig.height=9}
+
+#reactable(table_mark, highlight = TRUE, minRows = 10)
+
+#table <- subset(table, table$`Property Name` != "Avant")
+#table <- subset(table, table$`Property Name` != "Pathways at Bixby Village")
+
+
+# table$`Property % Chg since 2/28` <- scales::percent(table$`Property % Chg since 2/28`)
+# table$`Comps % Chg since 2/28` <- scales::percent(table$`Comps % Chg since 2/28`)
+# table$`ESS Premium to Comps, %` <- scales::percent(table$`ESS Premium to Comps, %`)
+# table$`Property Avg. Asking Rent` <- scales::dollar(table$`Property Avg. Asking Rent`)
+# table$`Comps Avg. Asking Rent` <- scales::dollar(table$`Comps Avg. Asking Rent`)
+
+
+table <- merge(table, submark_ess_current_time, by.x = "Submarket", by.y = "ess_submarket")
+table_ts <- merge(table_ts, submark_ess_current_time, by.x = "Submarket", by.y = "ess_submarket")
+
+fwrite(table, "C:/Users/kplank/Essex Property Trust, Inc/Costar Data - Documents/power_bi_rent_data/table_data.csv")
+fwrite(table, paste0("C:/Users/kplank/Essex Property Trust, Inc/Costar Data - Documents/comp_tables/underlying_comp_table_", curr, ".csv"))
+fwrite(table_ts, "C:/Users/kplank/Essex Property Trust, Inc/Costar Data - Documents/power_bi_rent_data/cleaned_ts_data.csv", na= "")
+# 
+# table %<>% select(Market, `Property Avg. Asking Rent`,
+#                            `Property % Chg since 2/28`,
+#                            `Comps Avg. Asking Rent`,
+#                            `Comps % Chg since 2/28`,
+#                            `ESS Premium to Comps, %`,
+#                            `Submarket % Change since 2/28`,
+#                            `Submarket Avg. Asking Rent`,
+#                            `# of Comps`)
+
+#`Submarket % Change since 2/28` =ess_submark_avg_asking_unit_pct, `Submarket Avg. Asking Rent` = ess_submark_avg_asking_unit
+
+# `1 Bed % Chg since 2/28`=one_bedroom_avg_asking_pct_change_prop,
+#                            `1 Bed % Chg since 2/28 (Comp)`=one_bedroom_avg_asking_pct_change_comp,
+#                            `2 Bed % Chg since 2/28`=two_bedroom_avg_asking_pct_change_prop,
+#                            `2 Bed % Chg since 2/28 (Comp)`=two_bedroom_avg_asking_pct_change_comp,
+#                            `Studio % Chg since 2/28`=studio_avg_asking_pct_change_prop, 
+#                            `Studio % Chg since 2/28 (Comp)`= studio_avg_asking_pct_change_comp,
+
+
+# 
+# reactable(table, filterable = TRUE, searchable = TRUE, resizable = TRUE, highlight = TRUE, groupBy=c("Market", "RPM", "Property Name"),minRows = 10, 
+#           columns = list(
+#   `Property Avg. Asking Rent` = colDef(aggregate = "mean", format = colFormat(prefix = "$", separators = TRUE, digits = 0)),
+#   `Property % Chg since 2/28` = colDef(aggregate = "mean", style = JS("
+#     function(rowInfo) {
+#       var value = rowInfo.row.extra
+#       if (value > 0) {
+#         var color = '#008000'
+#       } else if (value < 0) {
+#         var color = '#e00000'
+#       } else {
+#         var color = '#777'
+#       }
+#       return { color: color, fontWeight: 'bold' }
+#     }
+#   "), format = colFormat(percent=TRUE, digits = 1)),
+#   `Comps Avg. Asking Rent` = colDef(aggregate = "mean", format = colFormat(prefix = "$", separators = TRUE, digits = 0)),
+#   `Comps % Chg since 2/28`= colDef(aggregate = "mean", format = colFormat(percent=TRUE, digits = 1)),
+#   `ESS Premium to Comps, %` = colDef(aggregate = "mean", format = colFormat(percent=TRUE, digits = 1)),
+#   `1 Bed % Chg since 2/28` = colDef(aggregate = "mean", format = colFormat(percent=TRUE, digits = 1)),
+#   `1 Bed % Chg since 2/28 (Comp)` = colDef(aggregate = "mean", format = colFormat(percent=TRUE, digits = 1)),
+#   `2 Bed % Chg since 2/28` = colDef(aggregate = "mean", format = colFormat(percent=TRUE, digits = 1)),
+#   `2 Bed % Chg since 2/28 (Comp)` = colDef(aggregate = "mean", format = colFormat(percent=TRUE, digits = 1)),
+#   `Studio % Chg since 2/28` = colDef(aggregate = "mean", format = colFormat(percent=TRUE, digits = 1)),
+#   `Studio % Chg since 2/28 (Comp)` = colDef(aggregate = "mean", format = colFormat(percent=TRUE, digits = 1)),
+#   `Submarket % Change since 2/28` = colDef(aggregate = "mean", format = colFormat(percent=TRUE, digits = 1)),
+#   `Submarket Avg. Asking Rent` = colDef(aggregate = "mean", format = colFormat(prefix = "$", separators = TRUE, digits = 0)),
+#   `# of Comps` = colDef(aggregate = "sum", format = colFormat(digits = 0)),
+#   `ESS. Submarket % Change since 2/28` = colDef(aggregate = "mean", format = colFormat(percent=TRUE, digits = 1))
+# ))
+
+
+
+
+
+# reactable(table, filterable = TRUE, minRows = 10) %>% 
+#   formatPercentage(c("Property % Chg since 2/28", "Comps % Chg since 2/28", "ESS Premium to Comps, %"), 1) %>%
+#     formatCurrency(c("Property Avg. Asking Rent", "Comps Avg. Asking Rent"),"$", digits =0)
+
+
+```
+
+
